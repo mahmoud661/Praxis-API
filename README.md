@@ -13,30 +13,54 @@ rules and where to put new features.
 
 ## Architecture
 
-```text
-                          ┌──────────────────┐
-   Frontend ────HTTPS────▶│     Gateway      │  (TS Express, :3000)
-                          │  - cookie session│
-                          │  - Redis lookup  │
-                          │  - inject X-User │
-                          └────────┬─────────┘
-                                   │  HTTP (cookie stripped, X-User-Id added)
-              ┌────────────────────┼──────────────────────┐
-              ▼                                           ▼
-       ┌──────────────┐                             ┌────────────────────┐
-       │ auth-service │                             │ ai-agents-service  │
-       │  (TS, :3001) │                             │  (Python, :8000)   │
-       │  Postgres    │                             │  Postgres          │
-       │  Redis (sess)│                             │                    │
-       └──────┬───────┘                             └───────┬────────────┘
-              │ produces                                    │ consumes
-              │ auth.events.v1                              │ auth.events.v1
-              └────────────────────► Kafka ◄────────────────┘
-                                       │
-                              ┌────────┴────────┐
-                              │  OTel Collector │ ─▶ Jaeger
-                              │                 │ ─▶ Prometheus ─▶ Grafana
-                              └─────────────────┘
+```mermaid
+flowchart TB
+    FE([Frontend])
+
+    subgraph edge["Edge"]
+        Caddy["Caddy TLS<br/>:8443"]
+        GW["Gateway<br/>TS Express · :4000<br/>cookie session · Redis lookup<br/>injects X-User-*"]
+    end
+
+    subgraph services["Services"]
+        Auth["auth-service<br/>TS · :3001"]
+        AI["ai-agents-service<br/>Python · :8000"]
+    end
+
+    subgraph data["Data stores"]
+        AuthDB[("Postgres<br/>auth")]
+        AIDB[("Postgres<br/>ai-agents")]
+        Redis[("Redis<br/>sessions")]
+    end
+
+    Kafka{{"Kafka<br/>auth.events.v1"}}
+
+    subgraph obs["Observability"]
+        OTel["OTel Collector"]
+        Jaeger["Jaeger"]
+        Prom["Prometheus"]
+        Loki["Loki"]
+        Grafana["Grafana"]
+    end
+
+    FE -- HTTPS --> Caddy --> GW
+    GW <-. "sess lookup" .-> Redis
+    GW -- "HTTP · X-User-*" --> Auth
+    GW -- "HTTP · X-User-*" --> AI
+    Auth --> AuthDB
+    Auth --> Redis
+    AI --> AIDB
+    Auth -- produces --> Kafka -- consumes --> AI
+
+    GW -. OTLP .-> OTel
+    Auth -. OTLP .-> OTel
+    AI -. OTLP .-> OTel
+    OTel --> Jaeger
+    OTel --> Prom
+    OTel --> Loki
+    Prom --> Grafana
+    Loki --> Grafana
+    Jaeger --> Grafana
 ```
 
 **Sync path** (user clicks, waits for response): Frontend → Gateway → service.
