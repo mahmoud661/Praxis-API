@@ -70,15 +70,20 @@ jobs:
         working-directory: ${{ inputs.working-dir }}
         run: npm install --include=dev
 
+      # Install into a uv-managed venv (NOT --system). Ubuntu 24.04 marks
+      # `/usr` as externally-managed (PEP 668), so --system is blocked.
+      # `uv run <cmd>` automatically uses the .venv created by `uv venv`.
       - name: Install (Python)
         if: inputs.runtime == 'python'
         working-directory: ${{ inputs.working-dir }}
-        run: uv pip install --system -r requirements.txt
+        run: |
+          uv venv .venv
+          uv pip install -r requirements.txt
 
       - name: Run integration tests
         working-directory: ${{ inputs.working-dir }}
         env:
-          DEFAULT_SCRIPT: "${{ inputs.runtime == 'node' && 'npm run test:integration' || 'pytest tests-integration' }}"
+          DEFAULT_SCRIPT: "${{ inputs.runtime == 'node' && 'npm run test:integration' || 'uv run pytest tests-integration' }}"
         run: |
           CMD="${{ inputs.script }}"
           if [ -z "$CMD" ]; then CMD="$DEFAULT_SCRIPT"; fi

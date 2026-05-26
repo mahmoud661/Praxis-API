@@ -56,21 +56,27 @@ jobs:
           cache: "npm"
           cache-dependency-path: ${{ inputs.working-dir }}/package-lock.json
 
-      - name: Setup Python + uv
+      # setup-uv@v3 does NOT accept `python-version`. We install Python
+      # via setup-python first; setup-uv then just drops in the `uv` binary.
+      - name: Setup Python
         if: inputs.runtime == 'python'
-        uses: astral-sh/setup-uv@v3
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python-version }}
+
+      - name: Setup uv
+        if: inputs.runtime == 'python'
+        uses: astral-sh/setup-uv@v3
 
       - name: Install (Node)
         if: inputs.runtime == 'node'
         working-directory: ${{ inputs.working-dir }}
         run: npm install --include=dev
 
-      - name: Install (Python)
-        if: inputs.runtime == 'python'
-        working-directory: ${{ inputs.working-dir }}
-        run: uv pip install --system -r requirements.txt
+      # NOTE: no Python install step. Ruff is standalone — `uv run --with
+      # ruff` provisions it in an ephemeral env. Avoids `uv pip install
+      # --system` which is blocked on Ubuntu 24.04 (PEP 668 externally-
+      # managed system Python).
 
       - name: Lint (Node)
         if: inputs.runtime == 'node'
