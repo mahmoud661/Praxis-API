@@ -1,0 +1,26 @@
+# Auto-label PRs based on which files they touch. Config in
+# .github/labeler.yml (see the multi-labeler README for the schema).
+#
+# Uses `pull_request_target` so it can label PRs from forks — we only
+# read the labeler config from the base branch, so this is safe (no
+# untrusted code runs).
+
+name: pr-labeler
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: fuxingloh/multi-labeler@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          config-path: .github/labeler.yml

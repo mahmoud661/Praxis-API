@@ -1,0 +1,127 @@
+# Config for the auto-labeler workflow (.github/workflows/labeler.yml).
+# Schema: https://github.com/fuxingloh/multi-labeler
+#
+# Each label has `sync: true` so it's removed when the matching files are
+# no longer touched in the PR. Two "protected" labels at the bottom have
+# sync: false — they're owned by other automations (e.g. external/internal)
+# and must never be removed by this action.
+
+version: v1
+
+labels:
+  # ---- Services ----------------------------------------------------------
+  - label: gateway
+    sync: true
+    matcher:
+      files:
+        any:
+          - "backend/gateway/**"
+
+  - label: auth-service
+    sync: true
+    matcher:
+      files:
+        any:
+          - "backend/services/auth/**"
+
+  - label: ai-agents-service
+    sync: true
+    matcher:
+      files:
+        any:
+          - "backend/services/ai-agents/**"
+
+  # ---- Platform / infra --------------------------------------------------
+  - label: infra
+    sync: true
+    matcher:
+      files:
+        any:
+          - "backend/infra/**"
+          - "backend/Makefile"
+          - "backend/.env.example"
+
+  - label: contracts
+    sync: true
+    matcher:
+      files:
+        any:
+          - "backend/contracts/**"
+
+  - label: migrations
+    sync: true
+    matcher:
+      files:
+        any:
+          - "**/migrations/**"
+
+  # ---- Code quality / tests ----------------------------------------------
+  - label: tests
+    sync: true
+    matcher:
+      files:
+        any:
+          - "**/tests/**"
+          - "**/tests-integration/**"
+
+  # ---- Repo plumbing -----------------------------------------------------
+  - label: ci
+    sync: true
+    matcher:
+      files:
+        any:
+          - ".github/workflows/**"
+          - ".github/labeler.yml"
+          - ".github/OWNERS"
+          - ".github/pull_request_template.md"
+
+  - label: docs
+    sync: true
+    matcher:
+      files:
+        any:
+          - "**/README.md"
+          - "**/CONTRIBUTING.md"
+          - "backend/docs/**"
+
+  # ---- Language-specific (useful for filtering reviewer dashboards) ------
+  - label: python
+    sync: true
+    matcher:
+      files:
+        any:
+          - "**/*.py"
+          - "**/pyproject.toml"
+          - "**/requirements.txt"
+
+  - label: typescript
+    sync: true
+    matcher:
+      files:
+        any:
+          - "**/*.ts"
+          - "**/package.json"
+
+  # ---- Protected labels: owned by external automations -------------------
+  # `sync: false` means this action never REMOVES them. They can still be
+  # added by other workflows (e.g. tag-external-contributions, if/when set up).
+  - label: external
+    sync: false
+    matcher:
+      files:
+        any:
+          - ".github/labeler-protected-external-never-matches"
+
+  - label: internal
+    sync: false
+    matcher:
+      files:
+        any:
+          - ".github/labeler-protected-internal-never-matches"
+
+  - label: needs-title
+    sync: false
+    matcher:
+      files:
+        any:
+          - ".github/labeler-protected-needs-title-never-matches"

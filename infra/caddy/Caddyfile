@@ -1,0 +1,31 @@
+# Edge: TLS termination + single entry point.
+#
+# In dev, Caddy issues a self-signed cert from its internal CA for the
+# explicit hostnames listed below. In prod, swap them for real hostnames
+# and Caddy auto-provisions Let's Encrypt certs.
+
+{
+    auto_https disable_redirects
+}
+
+# `tls internal` needs an explicit hostname to put in the cert; a bare `:443`
+# block has no name to issue for. Listing `localhost` plus the service DNS
+# name `caddy` covers both host-side curl and in-network containers.
+localhost, caddy {
+    tls internal
+
+    handle /healthz {
+        reverse_proxy gateway:3000
+    }
+
+    handle {
+        reverse_proxy gateway:3000 {
+            header_up X-Forwarded-Proto https
+        }
+    }
+}
+
+# Plain HTTP -> tell clients to use TLS.
+:80 {
+    redir https://{host}{uri} 308
+}

@@ -1,0 +1,8 @@
+Yes. blank_issues_enabled: false
+contact_links:
+  - name: Security disclosures
+    url: https://github.com/your-org/your-repo/security/advisories/new
+    about: Privately report a vulnerability instead of opening a public issue.
+  - name: General questions / discussions
+    url: https://github.com/your-org/your-repo/discussions
+    about: Ask a question or share an idea (not a bug or feature request).

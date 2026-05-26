@@ -1,0 +1,24 @@
+# CODEOWNERS-style file with one extension: a trailing
+# `# auto-request[: @a @b]` marker tells the PR welcome workflow to
+# auto-request review from those handles (subset of the rule's owners).
+# Without the marker, owners are only *mentioned* in the welcome comment.
+#
+# Last matching rule wins (same as GitHub's CODEOWNERS).
+
+# Fallback owner for anything not matched below
+*                                                  @mahmoud661
+
+# ---- Services -------------------------------------------------------
+backend/gateway/**                                 @mahmoud661  # auto-request
+backend/services/auth/**                           @mahmoud661  # auto-request
+backend/services/ai-agents/**                      @mahmoud661  # auto-request
+
+# ---- Platform / infra ----------------------------------------------
+backend/infra/**                                   @mahmoud661  # auto-request
+backend/contracts/**                               @mahmoud661  # auto-request
+
+# ---- Schema migrations need extra eyes -----------------------------
+**/migrations/**                                   @mahmoud661  # auto-request
+
+# ---- Repo plumbing -------------------------------------------------
+.github/**                                         @mahmoud661

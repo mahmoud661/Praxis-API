@@ -1,0 +1,53 @@
+{
+  "name": "auth-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Authentication service. Clean Architecture + SOLID, DI via tsyringe.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "start:dev": "ts-node-dev --respawn --transpile-only src/main.ts",
+    "clean": "rimraf dist",
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "migrate": "node-pg-migrate -j sql -m migrations -d DATABASE_URL up"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cookie-parser": "^1.4.6",
+    "helmet": "^7.1.0",
+    "cors": "^2.8.5",
+    "zod": "^3.23.8",
+    "ioredis": "^5.4.1",
+    "pg": "^8.11.5",
+    "bcrypt": "^5.1.1",
+    "uuid": "^9.0.1",
+    "pino": "^9.1.0",
+    "pino-http": "^9.0.0",
+    "kafkajs": "^2.2.4",
+    "dotenv": "^16.4.5",
+    "tsyringe": "^4.8.0",
+    "reflect-metadata": "^0.2.2",
+    "node-pg-migrate": "^7.6.1",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.48.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.52.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "ts-node-dev": "^2.0.0",
+    "rimraf": "^5.0.5",
+    "vitest": "^1.6.0",
+    "@testcontainers/postgresql": "^10.13.0",
+    "testcontainers": "^10.13.0",
+    "@types/express": "^4.17.21",
+    "@types/cookie-parser": "^1.4.7",
+    "@types/cors": "^2.8.17",
+    "@types/bcrypt": "^5.0.2",
+    "@types/uuid": "^9.0.8",
+    "@types/pg": "^8.11.5",
+    "@types/node": "^20.12.7"
+  }
+}

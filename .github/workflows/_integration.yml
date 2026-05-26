@@ -1,0 +1,79 @@
+# Reusable integration-test workflow. Runs tests that spin up real
+# containers via testcontainers (e.g. real Postgres for repository
+# round-trips). Kept separate from the image-build gate so a slow or
+# flaky integration test doesn't block the image.
+
+name: integration
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      working-dir:
+        required: true
+        type: string
+      runtime:
+        required: true
+        type: string
+        description: "node | python"
+      node-version:
+        required: false
+        type: string
+        default: "20"
+      python-version:
+        required: false
+        type: string
+        default: "3.12"
+      script:
+        required: false
+        type: string
+        default: ""
+        description: "Command to run. Defaults vary by runtime."
+
+jobs:
+  integration:
+    name: "integration ${{ inputs.service-name }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node
+        if: inputs.runtime == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: ${{ inputs.working-dir }}/package-lock.json
+
+      - name: Setup Python + uv
+        if: inputs.runtime == 'python'
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install (Node)
+        if: inputs.runtime == 'node'
+        working-directory: ${{ inputs.working-dir }}
+        run: npm install --include=dev
+
+      - name: Install (Python)
+        if: inputs.runtime == 'python'
+        working-directory: ${{ inputs.working-dir }}
+        run: uv pip install --system -r requirements.txt
+
+      - name: Run integration tests
+        working-directory: ${{ inputs.working-dir }}
+        env:
+          DEFAULT_SCRIPT: "${{ inputs.runtime == 'node' && 'npm run test:integration' || 'pytest tests-integration' }}"
+        run: |
+          CMD="${{ inputs.script }}"
+          if [ -z "$CMD" ]; then CMD="$DEFAULT_SCRIPT"; fi
+          echo "Running: $CMD"
+          eval "$CMD"

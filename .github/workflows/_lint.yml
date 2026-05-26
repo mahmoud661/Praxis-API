@@ -1,0 +1,95 @@
+# Reusable lint workflow. Called by ci.yml per-service.
+#
+# Each service has its own toolchain (TS/eslint, Python/ruff), so the
+# caller passes:
+#   - service-name:    label that appears in the run name + log prefix
+#   - working-dir:     path the linter runs from
+#   - runtime:         "node" or "python" — picks the right setup steps
+#
+# Adding a 3rd language later means adding one branch here, not a new
+# workflow file per service.
+
+name: lint
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      working-dir:
+        required: true
+        type: string
+      runtime:
+        required: true
+        type: string
+        description: "node | python"
+      node-version:
+        required: false
+        type: string
+        default: "20"
+      python-version:
+        required: false
+        type: string
+        default: "3.12"
+
+env:
+  RUFF_OUTPUT_FORMAT: github
+
+jobs:
+  lint:
+    name: "lint ${{ inputs.service-name }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node
+        if: inputs.runtime == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: ${{ inputs.working-dir }}/package-lock.json
+
+      - name: Setup Python + uv
+        if: inputs.runtime == 'python'
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install (Node)
+        if: inputs.runtime == 'node'
+        working-directory: ${{ inputs.working-dir }}
+        run: npm install --include=dev
+
+      - name: Install (Python)
+        if: inputs.runtime == 'python'
+        working-directory: ${{ inputs.working-dir }}
+        run: uv pip install --system -r requirements.txt
+
+      - name: Lint (Node)
+        if: inputs.runtime == 'node'
+        working-directory: ${{ inputs.working-dir }}
+        # Lint script is optional: if a service doesn't define one yet,
+        # don't fail CI — the test job still gates the build.
+        run: |
+          if npm run --silent | grep -qE "^\s+lint"; then
+            npm run lint
+          else
+            echo "::notice::no lint script defined for ${{ inputs.service-name }}, skipping"
+          fi
+
+      - name: Lint (Python)
+        if: inputs.runtime == 'python'
+        working-directory: ${{ inputs.working-dir }}
+        run: |
+          if [ -f pyproject.toml ] && grep -q "^\\[tool.ruff\\]" pyproject.toml; then
+            uv run --with ruff ruff check .
+          else
+            echo "::notice::ruff config absent, skipping"
+          fi

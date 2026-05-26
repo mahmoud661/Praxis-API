@@ -1,0 +1,36 @@
+[project]
+name = "ai-agents-service"
+version = "0.1.0"
+description = "AI agents service: agent definitions, runs, LLM orchestration."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.111.0",
+  "uvicorn[standard]==0.29.0",
+  "pydantic==2.7.1",
+  "pydantic-settings==2.2.1",
+  "aiokafka==0.10.0",
+  "asyncpg==0.29.0",
+  "structlog==24.1.0",
+  "httpx==0.27.0",
+  "setuptools==70.0.0",
+  "opentelemetry-distro==0.46b0",
+  "opentelemetry-exporter-otlp-proto-http==1.25.0",
+  "opentelemetry-instrumentation-fastapi==0.46b0",
+  "opentelemetry-instrumentation-asyncpg==0.46b0",
+  "opentelemetry-instrumentation-logging==0.46b0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.2.0",
+  "pytest-asyncio==0.23.6",
+  "ruff==0.4.4",
+  "mypy==1.10.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

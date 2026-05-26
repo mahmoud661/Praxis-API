@@ -1,0 +1,50 @@
+# Weekly sweep: close issues that are still labelled `needs-title` after
+# 7 days. Pulls work from the queue so it never grows unbounded.
+
+name: close-needs-title
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"   # Monday 9:00 UTC
+  workflow_dispatch:
+
+jobs:
+  close-stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'needs-title',
+              state: 'open',
+              per_page: 100,
+            });
+
+            let closed = 0;
+            for (const issue of issues) {
+              if (issue.pull_request) continue;          // also returned by the issues API
+              if (new Date(issue.created_at).getTime() >= sevenDaysAgo) continue;
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
+                body: [
+                  'Closing this issue because the title was not updated within 7 days.',
+                  '',
+                  'Please open a fresh issue with a descriptive title.',
+                ].join('\n'),
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
+                state: 'closed', state_reason: 'not_planned',
+              });
+              closed++;
+            }
+            core.summary.addRaw(`Closed ${closed} stale needs-title issue(s).`).write();

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UserRegistered",
+  "description": "Emitted by auth-service when a new user account is created.",
+  "type": "object",
+  "required": ["userId", "email", "registeredAt"],
+  "additionalProperties": false,
+  "properties": {
+    "userId":       { "type": "string", "format": "uuid" },
+    "email":        { "type": "string", "format": "email" },
+    "registeredAt": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,109 @@
+# --------------------------------------------------------------------------
+# Backend monorepo .gitignore
+#
+# Covers: TS services + Python services + docker volumes that ever escape
+# (they shouldn't, but defense in depth) + editor + OS noise + secrets.
+# --------------------------------------------------------------------------
+
+# ---- Secrets ------------------------------------------------------------
+# Never commit the real env file. `.env.example` (checked in) is the template.
+.env
+.env.local
+.env.*.local
+*.local.env
+secrets/
+# Keys, certs, JWKS
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ---- Node / TypeScript --------------------------------------------------
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.cache/
+.eslintcache
+# Logs from npm/yarn/pnpm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+# Type/test caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+
+# ---- Test / coverage ----------------------------------------------------
+coverage/
+*.lcov
+.nyc_output/
+htmlcov/
+.coverage
+.coverage.*
+
+# ---- Docker -----------------------------------------------------------
+# Compose overrides for local-only tweaks (machine-specific, don't share).
+docker-compose.override.yml
+docker-compose.local.yml
+# Bind-mount data dirs if a developer ever switches volumes to bind mounts.
+data/
+postgres_data/
+kafka_data/
+redis_data/
+
+# ---- Database dumps / backups -------------------------------------------
+*.sql.gz
+*.dump
+*.backup
+backups/
+
+# ---- IDE / editor -------------------------------------------------------
+.vscode/
+.idea/
+*.iml
+*.code-workspace
+.history/
+*.swp
+*.swo
+*~
+
+# ---- OS noise -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+ehthumbs.db
+
+# ---- Logs ---------------------------------------------------------------
+*.log
+logs/
+
+# ---- Runtime artifacts --------------------------------------------------
+# A migration tool sometimes writes a marker; keep the source migrations,
+# ignore the marker.
+.migrate.tmp
+# Local Caddy data shouldn't be in repo if someone runs Caddy outside Docker.
+caddy_data/
+caddy_config/
+
+# ---- Misc ---------------------------------------------------------------
+# `node_modules` of nested workspaces if anyone adds them later.
+**/node_modules/
+# Frontend builds (in case someone copies a frontend `dist/` here by mistake).
+.next/
+out/

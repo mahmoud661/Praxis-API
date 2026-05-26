@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose a new capability or a change in behavior.
+title: "[feat]: <Please write a comprehensive title>"
+labels: [enhancement, needs-triage]
+
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Describe the problem first, then the proposed solution. We're
+        much more likely to take a PR you've already explored.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      placeholder: >
+        As a frontend developer I want X because Y. Today, getting Y
+        requires Z which is fragile.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should the API / config / behavior look like after this lands?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other options and why they're worse.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area would this touch?
+      multiple: true
+      options:
+        - gateway
+        - auth-service
+        - ai-agents-service
+        - infra
+        - contracts
+        - migrations
+        - a new service
+    validations:
+      required: true

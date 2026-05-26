@@ -1,0 +1,18 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: backend
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # All service metrics arrive here. Each service ships OTLP to the
+  # OpenTelemetry Collector; the collector re-exposes everything as a
+  # Prometheus endpoint at :8889. The `service_name` resource attribute
+  # becomes a `service_name` label, so Grafana can filter per service.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]

@@ -1,0 +1,138 @@
+# Backend CI orchestrator.
+#
+# This file is the only one a contributor needs to read to understand
+# what runs on a PR. It delegates the actual jobs to reusable workflows
+# in this folder (`_lint.yml`, `_test.yml`, `_build.yml`, `_integration.yml`),
+# which keeps the matrix here small and readable.
+#
+# Trigger model (mirrored from langchain-ai/docs):
+#   - `pull_request` for PRs (build only — no push)
+#   - `push` to main for the post-merge run (build + push to GHCR)
+#   - `workflow_dispatch` so anyone can re-run by hand
+#
+# Concurrency cancels stale runs on the same ref — saves runner minutes
+# and prevents two PR pushes from racing.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: read
+
+jobs:
+  # ----- Lint ----------------------------------------------------------
+  lint-gateway:
+    uses: ./.github/workflows/_lint.yml
+    with:
+      service-name: gateway
+      working-dir: gateway
+      runtime: node
+
+  lint-auth:
+    uses: ./.github/workflows/_lint.yml
+    with:
+      service-name: auth-service
+      working-dir: services/auth
+      runtime: node
+
+  lint-ai-agents:
+    uses: ./.github/workflows/_lint.yml
+    with:
+      service-name: ai-agents-service
+      working-dir: services/ai-agents
+      runtime: python
+
+  # ----- Build (tests run inside the Dockerfile) -----------------------
+  build-gateway:
+    uses: ./.github/workflows/_build.yml
+    with:
+      service-name: gateway
+      context: gateway
+      push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+  build-auth:
+    uses: ./.github/workflows/_build.yml
+    with:
+      service-name: auth-service
+      context: services/auth
+      push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+  build-ai-agents:
+    uses: ./.github/workflows/_build.yml
+    with:
+      service-name: ai-agents-service
+      context: services/ai-agents
+      push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+  # ----- Integration (testcontainers; heavier, doesn't block image) ----
+  integration-auth:
+    uses: ./.github/workflows/_integration.yml
+    with:
+      service-name: auth-service
+      working-dir: services/auth
+      runtime: node
+
+  # ----- Compose sanity check ------------------------------------------
+  compose-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Validate docker-compose
+        run: |
+          cp .env.example .env
+          # Inject a real SESSION_SECRET so the env validator is happy.
+          sed -i "s/^SESSION_SECRET=.*/SESSION_SECRET=$(openssl rand -hex 32)/" .env
+          docker compose -f infra/docker-compose.yml --env-file .env config --quiet
+
+  # ----- Gate ----------------------------------------------------------
+  # A single job that depends on the important ones; branch protection
+  # can require *just* `ci-success` instead of every individual matrix
+  # entry, so renaming a job doesn't break the protection rule.
+  ci-success:
+    if: always()
+    needs:
+      - lint-gateway
+      - lint-auth
+      - lint-ai-agents
+      - build-gateway
+      - build-auth
+      - build-ai-agents
+      - compose-config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate result
+        run: |
+          # `needs.*.result` is "success", "failure", "cancelled", or "skipped".
+          # We tolerate "skipped" (it just means a path-filtered job didn't run).
+          failed=0
+          for r in '${{ needs.lint-gateway.result }}' \
+                   '${{ needs.lint-auth.result }}' \
+                   '${{ needs.lint-ai-agents.result }}' \
+                   '${{ needs.build-gateway.result }}' \
+                   '${{ needs.build-ai-agents.result }}' \
+                   '${{ needs.build-auth.result }}' \
+                   '${{ needs.compose-config.result }}'; do
+            case "$r" in
+              success|skipped) ;;
+              *) failed=1 ;;
+            esac
+          done
+          if [ "$failed" -eq 1 ]; then
+            echo "::error::one or more required jobs failed"
+            exit 1
+          fi
+          echo "All required jobs passed."

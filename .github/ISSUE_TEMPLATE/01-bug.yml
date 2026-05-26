@@ -1,0 +1,66 @@
+name: Bug report
+description: Something doesn't work the way it should.
+title: "[bug]: <Please write a comprehensive title>"
+labels: [bug, needs-triage]
+
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Thanks for the report. The more concrete the repro, the faster
+        someone can fix it. If this is a security issue, please use the
+        "Security disclosures" link instead of this template.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area is affected?
+      options:
+        - gateway
+        - auth-service
+        - ai-agents-service
+        - infra (docker-compose / observability)
+        - contracts (Kafka events)
+        - migrations
+        - other / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what did you see?
+      placeholder: |
+        1. `make up`
+        2. POST /v1/auth/signup with body { ... }
+        3. Expected 201. Got 500 with body { "error": "INTERNAL" }.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / traces
+      description: >
+        Stdout from the failing container is usually enough. Trace IDs
+        (visible in Jaeger or the JSON log lines) are gold.
+      render: text
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or image tag
+      placeholder: "sha-abc1234 or main"
+
+  - type: dropdown
+    id: env
+    attributes:
+      label: Where did this happen?
+      options:
+        - local docker-compose
+        - CI
+        - deployed environment
+        - other
+    validations:
+      required: true

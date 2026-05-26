@@ -1,0 +1,88 @@
+# Adapted from langchain-ai/docs.
+#
+# When a PR or issue is opened/edited:
+#   - if the title still contains the issue-template placeholder text
+#     ("<Please write a comprehensive title>") OR is the literal default,
+#     comment once asking for a real title + label `needs-title`
+#   - otherwise, remove the `needs-title` label if it's there
+#
+# Pair this with `close-needs-title.yml` (weekly cron) which closes any
+# issue still labeled `needs-title` after 7 days.
+
+name: check-default-title
+
+on:
+  issues:
+    types: [opened, edited]
+  pull_request_target:
+    types: [opened, edited]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const isIssue = context.eventName === 'issues';
+            const item = isIssue ? context.payload.issue : context.payload.pull_request;
+            const title = item.title || '';
+            const num = item.number;
+            const kind = isIssue ? 'issue' : 'pull request';
+
+            // Placeholder strings used by our issue templates.
+            const placeholder = /<\s*please write a comprehensive title\s*>/i;
+            const isDefault =
+              placeholder.test(title) ||
+              /^(bug|feature|issue)\s*report\s*$/i.test(title.trim()) ||
+              title.trim().length < 5;
+
+            if (!isDefault) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  name: 'needs-title',
+                });
+              } catch (_) { /* label wasn't there, fine */ }
+              return;
+            }
+
+            // De-dupe so we don't comment again on every edit.
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: num,
+            });
+            const already = comments.data.some(c =>
+              c.user?.type === 'Bot' && (c.body || '').includes('<!-- default-title-check -->')
+            );
+            if (already) return;
+
+            const body = [
+              '<!-- default-title-check -->',
+              '',
+              `**Please update the title of this ${kind}.**`,
+              '',
+              `The current title still contains the template's placeholder text. A descriptive title helps reviewers triage and prioritize.`,
+              '',
+              '**Good titles**',
+              '- "gateway: idempotency cache leaks under concurrent retries"',
+              '- "auth-service: PostgresUnitOfWork misses ROLLBACK on COMMIT failure"',
+              '- "infra: bump kafka to 3.7.2 to pick up CVE-2024-XXXX"',
+              '',
+              `Until then, this ${kind} may not get attention from maintainers.`,
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: num, body,
+            });
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: num,
+                labels: ['needs-title'],
+              });
+            } catch (e) { /* label may not exist yet */ }

@@ -1,0 +1,176 @@
+# Welcome comment on new PRs.
+#
+# Reads .github/OWNERS (CODEOWNERS-style + optional `# auto-request`
+# trailer), figures out which areas the PR touches, and:
+#   1. Comments thanking the author + listing the relevant owners
+#   2. Auto-requests review from anyone with `# auto-request` on a
+#      matching rule (minus the PR author themself)
+#
+# Adapted from langchain-ai/docs. Same hardening:
+#   - Uses `pull_request_target` so it can comment on fork PRs.
+#   - Only READS OWNERS from the base branch; no untrusted code runs.
+
+name: pr-welcome-comment
+
+on:
+  pull_request_target:
+    types: [opened, ready_for_review]
+
+jobs:
+  welcome:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ !github.event.pull_request.draft }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const author = pr.user.login;
+
+            // ---- Read OWNERS from the base branch ------------------
+            let ownersContent;
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner, repo, path: '.github/OWNERS', ref: pr.base.ref,
+              });
+              ownersContent = Buffer.from(data.content, 'base64').toString();
+            } catch (err) {
+              console.log('No .github/OWNERS — nothing to do.');
+              return;
+            }
+
+            // ---- Parse rules: `<pattern> @owner ... # auto-request[: @x @y]`
+            const rules = [];
+            for (const raw of ownersContent.split('\n')) {
+              const line = raw.trim();
+              if (!line) continue;
+
+              const hashAt = line.indexOf('#');
+              const ruleText = (hashAt === -1 ? line : line.slice(0, hashAt)).trim();
+              const commentText = hashAt === -1 ? '' : line.slice(hashAt + 1).trim();
+              if (!ruleText) continue;
+
+              const parts = ruleText.split(/\s+/);
+              const pattern = parts[0];
+              const owners = parts.slice(1).filter(s => s.startsWith('@'));
+              if (owners.length === 0) continue;
+
+              let autoRequest = null;
+              const m = commentText.match(/^auto-request\b\s*:?\s*(.*)$/i);
+              if (m) {
+                const listed = m[1].split(/[\s,]+/).filter(t => t.startsWith('@'))
+                  .map(t => t.replace(/^@/, ''));
+                const names = owners.map(o => o.replace(/^@/, ''));
+                autoRequest = listed.length === 0
+                  ? names
+                  : listed.filter(u => names.map(n => n.toLowerCase()).includes(u.toLowerCase()));
+              }
+              rules.push({ pattern, owners, autoRequest });
+            }
+
+            // ---- Last-match-wins matcher (mirrors GitHub CODEOWNERS)
+            function match(path) {
+              let hit = null;
+              for (const r of rules) {
+                let p = r.pattern.startsWith('/') ? r.pattern.slice(1) : r.pattern;
+                let ok = false;
+                if (p === '*') ok = true;
+                else if (p.endsWith('/')) ok = path.startsWith(p);
+                else if (p.includes('*')) {
+                  const re = new RegExp('^' +
+                    p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+                  ok = re.test(path);
+                } else {
+                  ok = path === p;
+                }
+                if (ok) hit = r;
+              }
+              return hit;
+            }
+
+            // ---- Translate a path into a human area name -----------
+            function area(p) {
+              if (p.startsWith('backend/gateway/')) return 'gateway';
+              if (p.startsWith('backend/services/auth/')) return 'auth-service';
+              if (p.startsWith('backend/services/ai-agents/')) return 'ai-agents-service';
+              if (p.startsWith('backend/infra/')) return 'platform infra';
+              if (p.startsWith('backend/contracts/')) return 'event contracts';
+              if (p.includes('/migrations/')) return 'DB migrations';
+              if (p.startsWith('.github/')) return 'repo plumbing';
+              return null;
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+
+            const areaOwners = new Map();
+            const autoReviewers = new Set();
+            let authorOwns = false;
+
+            for (const f of files) {
+              const rule = match(f.filename);
+              const owners = rule?.owners.map(o => o.replace(/^@/, '')) ?? [];
+              if (owners.some(o => o.toLowerCase() === author.toLowerCase())) authorOwns = true;
+
+              if (rule?.autoRequest) {
+                for (const u of rule.autoRequest) {
+                  if (u.toLowerCase() !== author.toLowerCase()) autoReviewers.add(u);
+                }
+              }
+
+              const a = area(f.filename);
+              if (!a || owners.length === 0) continue;
+              if (owners.some(o => o.toLowerCase() === author.toLowerCase())) continue;
+              if (!areaOwners.has(a)) areaOwners.set(a, new Set());
+              for (const o of owners) areaOwners.get(a).add(o);
+            }
+
+            // ---- Auto-request reviewers (best effort) --------------
+            if (autoReviewers.size > 0) {
+              try {
+                await github.rest.pulls.requestReviewers({
+                  owner, repo, pull_number: pr.number,
+                  reviewers: [...autoReviewers],
+                });
+              } catch (e) { console.log(`auto-request failed: ${e.message}`); }
+            }
+
+            if (areaOwners.size === 0) {
+              if (authorOwns) return;     // PR author owns everything they touched
+              // Nothing matched + author isn't an owner: still post a thanks.
+            }
+
+            // ---- Build the comment --------------------------------
+            function fmt(set) {
+              const ms = [...set].map(o => `\`@${o}\``);
+              if (ms.length === 0) return '';
+              if (ms.length === 1) return ms[0];
+              if (ms.length === 2) return `${ms[0]} or ${ms[1]}`;
+              return ms.slice(0, -1).join(', ') + `, or ${ms[ms.length - 1]}`;
+            }
+
+            const lines = [...areaOwners.entries()].map(
+              ([a, set]) => `- ${fmt(set)} (${a})`
+            );
+
+            const body = [
+              `Thanks for opening this PR, @${author}!`,
+              '',
+              lines.length > 0
+                ? 'When it\'s ready for review, please add the relevant reviewers:\n\n' + lines.join('\n')
+                : 'No specific owner mapped to the files in this PR. A maintainer will triage shortly.',
+              '',
+              'Quick reminders:',
+              '- All unit tests run **inside the Dockerfile build** — a green CI means the image already builds with passing tests.',
+              '- See [CONTRIBUTING.md](../CONTRIBUTING.md) for the local dev loop.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: pr.number, body,
+            });

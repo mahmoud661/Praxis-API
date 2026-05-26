@@ -1,0 +1,46 @@
+# Reusable unit-test workflow.
+#
+# We don't run `npm test` / `pytest` directly on the runner — the
+# Dockerfile already runs them inside the build stage (see RUN npm test
+# / RUN pytest). So this job just builds the image; a test failure
+# aborts the build and the image is never produced.
+#
+# Splitting test-running and image-building like this means CI runs the
+# same tests that ship inside the image — there's no separate path
+# where tests could pass in CI but fail in the container.
+
+name: test
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      context:
+        required: true
+        type: string
+        description: "Docker build context (path to the service)"
+
+jobs:
+  test:
+    name: "test ${{ inputs.service-name }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (tests gate the image)
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context }}
+          push: false
+          load: false
+          cache-from: type=gha,scope=${{ inputs.service-name }}
+          cache-to: type=gha,scope=${{ inputs.service-name }},mode=max

@@ -1,0 +1,370 @@
+# Whole-stack compose: platform infra + application services.
+# All containers join the `backend_platform` network so they can reach each
+# other by service name.
+
+name: backend
+
+# ---------------------------------------------------------------------------
+# YAML anchors — share defaults across services so onboarding a new service
+# is one block, not 30 lines of boilerplate.
+# ---------------------------------------------------------------------------
+
+# OpenTelemetry env shared by every app service.
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+  OTEL_TRACES_EXPORTER: "otlp"
+  OTEL_METRICS_EXPORTER: "otlp"
+  OTEL_LOGS_EXPORTER: "none"
+  OTEL_PROPAGATORS: "tracecontext,baggage"
+
+x-node-otel-env: &node-otel-env
+  <<: *otel-env
+  NODE_OPTIONS: "--require @opentelemetry/auto-instrumentations-node/register"
+
+# Default restart + resource budget for long-running services. Compose v2
+# reads `deploy.resources.limits` even outside Swarm.
+x-app-defaults: &app-defaults
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits: { cpus: "0.75", memory: "512M" }
+      reservations: { cpus: "0.1", memory: "128M" }
+
+# Smaller budget for platform services that mostly idle.
+x-platform-defaults: &platform-defaults
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits: { cpus: "1.0", memory: "1G" }
+      reservations: { cpus: "0.1", memory: "128M" }
+
+networks:
+  backend_platform:
+    name: ${PLATFORM_NETWORK:-backend_platform}
+    driver: bridge
+
+volumes:
+  kafka_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  postgres_auth_data:
+  postgres_agents_data:
+  caddy_data:
+  caddy_config:
+
+services:
+  # ============================================================
+  # Edge: TLS termination + single public entry point
+  # ============================================================
+  # Caddy auto-generates a self-signed cert for local development.
+  # The frontend talks HTTPS to https://localhost:${CADDY_HTTPS_PORT}.
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: caddy
+    networks: [backend_platform]
+    ports:
+      - "${CADDY_HTTPS_PORT:-8443}:443"
+      - "${CADDY_HTTP_PORT:-8888}:80"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      gateway: { condition: service_started }
+    <<: *platform-defaults
+
+  # ============================================================
+  # Platform: messaging + cache
+  # ============================================================
+  kafka:
+    image: apache/kafka:3.7.1
+    container_name: kafka
+    networks: [backend_platform]
+    ports:
+      - "${KAFKA_EXTERNAL_PORT:-9094}:9094"
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    <<: *platform-defaults
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    networks: [backend_platform]
+    depends_on: [kafka]
+    ports:
+      - "${KAFKA_UI_PORT:-8080}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "local"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:9092"
+    <<: *platform-defaults
+
+  # One-shot init: declares topics + DLQs, then exits 0.
+  kafka-init:
+    image: apache/kafka:3.7.1
+    container_name: kafka-init
+    networks: [backend_platform]
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        echo "Creating topics..."
+        for topic in auth.events.v1 agents.events.v1 auth.events.v1.dlq agents.events.v1.dlq; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+            --topic "$$topic" --partitions 3 --replication-factor 1
+        done
+        echo "Topics ready:"
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    networks: [backend_platform]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    <<: *platform-defaults
+
+  # ============================================================
+  # Platform: per-service Postgres
+  # ============================================================
+  postgres-auth:
+    image: postgres:16-alpine
+    container_name: postgres-auth
+    networks: [backend_platform]
+    ports:
+      - "${AUTH_DB_PORT:-5433}:5432"
+    environment:
+      POSTGRES_USER: ${AUTH_DB_USER:-auth}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:-auth}
+      POSTGRES_DB: ${AUTH_DB_NAME:-auth}
+    volumes:
+      - postgres_auth_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AUTH_DB_USER:-auth} -d ${AUTH_DB_NAME:-auth}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    <<: *platform-defaults
+
+  postgres-agents:
+    image: postgres:16-alpine
+    container_name: postgres-agents
+    networks: [backend_platform]
+    ports:
+      - "${AGENTS_DB_PORT:-5434}:5432"
+    environment:
+      POSTGRES_USER: ${AGENTS_DB_USER:-agents}
+      POSTGRES_PASSWORD: ${AGENTS_DB_PASSWORD:-agents}
+      POSTGRES_DB: ${AGENTS_DB_NAME:-agents}
+    volumes:
+      - postgres_agents_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AGENTS_DB_USER:-agents} -d ${AGENTS_DB_NAME:-agents}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    <<: *platform-defaults
+
+  # ============================================================
+  # Platform: observability — traces, metrics, logs, dashboards
+  # ============================================================
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: jaeger
+    networks: [backend_platform]
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    <<: *platform-defaults
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.100.0
+    container_name: otel-collector
+    networks: [backend_platform]
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "${OTEL_GRPC_PORT:-4317}:4317"
+      - "${OTEL_HTTP_PORT:-4318}:4318"
+      - "8889:8889"
+    depends_on: [jaeger]
+    <<: *platform-defaults
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: prometheus
+    networks: [backend_platform]
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    <<: *platform-defaults
+
+  # Centralized log store. Promtail tails Docker container stdout/stderr
+  # and ships it here; Grafana queries Loki the same way it queries
+  # Prometheus.
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    networks: [backend_platform]
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    <<: *platform-defaults
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: promtail
+    networks: [backend_platform]
+    volumes:
+      - ./loki/promtail-config.yaml:/etc/promtail/config.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ["-config.file=/etc/promtail/config.yaml"]
+    depends_on: [loki]
+    <<: *platform-defaults
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: grafana
+    networks: [backend_platform]
+    ports:
+      - "${GRAFANA_PORT:-3030}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus, loki]
+    <<: *platform-defaults
+
+  # ============================================================
+  # Applications
+  # ============================================================
+  auth-service:
+    build:
+      context: ../services/auth
+      dockerfile: Dockerfile
+    container_name: auth-service
+    networks: [backend_platform]
+    environment:
+      <<: *node-otel-env
+      OTEL_SERVICE_NAME: auth-service
+      # Local stack runs plain HTTP behind Caddy → keep cookie non-Secure.
+      # In prod set to "production".
+      NODE_ENV: development
+      PORT: ${AUTH_PORT:-3001}
+      DATABASE_URL: ${AUTH_DATABASE_URL}
+      REDIS_URL: ${REDIS_URL_INTERNAL}
+      KAFKA_BROKERS: ${KAFKA_BROKERS_INTERNAL}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS}
+      SESSION_SECRET: ${SESSION_SECRET}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+      OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
+    depends_on:
+      postgres-auth: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+    <<: *app-defaults
+
+  ai-agents-service:
+    build:
+      context: ../services/ai-agents
+      dockerfile: Dockerfile
+    container_name: ai-agents-service
+    networks: [backend_platform]
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: ai-agents-service
+      PORT: ${AGENTS_PORT:-8000}
+      DATABASE_URL: ${AGENTS_DATABASE_URL}
+      KAFKA_BROKERS: ${KAFKA_BROKERS_INTERNAL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      KAFKA_MAX_HANDLER_ATTEMPTS: ${KAFKA_MAX_HANDLER_ATTEMPTS:-3}
+    depends_on:
+      postgres-agents: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+    <<: *app-defaults
+
+  gateway:
+    build:
+      context: ../gateway
+      dockerfile: Dockerfile
+    container_name: gateway
+    networks: [backend_platform]
+    ports:
+      - "${GATEWAY_PORT:-4000}:3000"
+    environment:
+      <<: *node-otel-env
+      OTEL_SERVICE_NAME: gateway
+      NODE_ENV: development
+      PORT: 3000
+      PUBLIC_ORIGIN: ${GATEWAY_PUBLIC_ORIGIN}
+      # CORS allow-list: comma-separated origins. CORS code splits and trims.
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS}
+      REDIS_URL: ${REDIS_URL_INTERNAL}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME}
+      SESSION_SECRET: ${SESSION_SECRET}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
+      AI_AGENTS_SERVICE_URL: ${AI_AGENTS_SERVICE_URL}
+      # Resilience
+      PROXY_RETRY_COUNT: ${PROXY_RETRY_COUNT:-2}
+      PROXY_CB_THRESHOLD: ${PROXY_CB_THRESHOLD:-5}
+      PROXY_CB_RESET_MS: ${PROXY_CB_RESET_MS:-15000}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}
+    depends_on:
+      redis: { condition: service_healthy }
+      auth-service: { condition: service_started }
+      ai-agents-service: { condition: service_started }
+    <<: *app-defaults
