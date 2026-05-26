@@ -52,11 +52,18 @@ jobs:
           cache: "npm"
           cache-dependency-path: ${{ inputs.working-dir }}/package-lock.json
 
-      - name: Setup Python + uv
+      # NOTE: setup-uv@v3 does NOT accept a `python-version` input. We use
+      # actions/setup-python to pin the interpreter, then setup-uv just
+      # installs the `uv` binary on top.
+      - name: Setup Python
         if: inputs.runtime == 'python'
-        uses: astral-sh/setup-uv@v3
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python-version }}
+
+      - name: Setup uv
+        if: inputs.runtime == 'python'
+        uses: astral-sh/setup-uv@v3
 
       - name: Install (Node)
         if: inputs.runtime == 'node'
