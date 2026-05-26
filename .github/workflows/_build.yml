@@ -1,4 +1,4 @@
-Oh. # Reusable build+push workflow. Builds a service's Docker image and
+# Reusable build+push workflow. Builds a service's Docker image and
 # (optionally) pushes it to GHCR.
 #
 # Caller controls `push` so PRs build-without-push and `main` pushes.
