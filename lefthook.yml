@@ -15,6 +15,10 @@
 #   - services/auth/node_modules     (cd services/auth && npm install)
 #   - uv on PATH for ai-agents       (https://docs.astral.sh/uv/)
 #
+# Globs: gobwas/glob (what lefthook uses) treats `**/` as one-or-more
+# directories — it does NOT match a path directly under the parent. So
+# we always list BOTH the shallow and deep patterns.
+#
 # Skip a hook for one commit: `git commit --no-verify`
 # Skip a hook for one push:    `git push --no-verify`
 
@@ -22,13 +26,17 @@ pre-commit:
   parallel: true
   jobs:
     - name: eslint-gateway
-      glob: "gateway/**/*.ts"
+      glob:
+        - "gateway/*.ts"
+        - "gateway/**/*.ts"
       root: gateway
       run: npx eslint --fix --max-warnings 0 {staged_files}
       stage_fixed: true
 
     - name: eslint-auth
-      glob: "services/auth/**/*.ts"
+      glob:
+        - "services/auth/*.ts"
+        - "services/auth/**/*.ts"
       root: services/auth
       run: npx eslint --fix --max-warnings 0 {staged_files}
       stage_fixed: true
@@ -36,7 +44,9 @@ pre-commit:
     # `uvx ruff` provisions ruff in an ephemeral env — no need to
     # install Python deps locally just to lint.
     - name: ruff-ai-agents
-      glob: "services/ai-agents/**/*.py"
+      glob:
+        - "services/ai-agents/*.py"
+        - "services/ai-agents/**/*.py"
       root: services/ai-agents
       run: uvx ruff check --fix {staged_files}
       stage_fixed: true
@@ -47,16 +57,22 @@ pre-push:
     # Each job's `glob` matches files being pushed. If your push only
     # touches docs/ or one service, the others' linters don't run.
     - name: lint-gateway
-      glob: "gateway/**"
+      glob:
+        - "gateway/*"
+        - "gateway/**"
       root: gateway
       run: npm run lint
 
     - name: lint-auth
-      glob: "services/auth/**"
+      glob:
+        - "services/auth/*"
+        - "services/auth/**"
       root: services/auth
       run: npm run lint
 
     - name: lint-ai-agents
-      glob: "services/ai-agents/**"
+      glob:
+        - "services/ai-agents/*"
+        - "services/ai-agents/**"
       root: services/ai-agents
       run: uvx ruff check .
