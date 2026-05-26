@@ -1,10 +1,11 @@
 SHELL := /bin/sh
 COMPOSE := docker compose -f infra/docker-compose.yml --env-file .env
 
-.PHONY: help up down logs ps restart pull clean status build kafka-topics
+.PHONY: help setup up down logs ps restart pull clean status build kafka-topics
 
 help:
 	@echo "Targets:"
+	@echo "  setup         First-time clone setup (deps, hooks, .env)"
 	@echo "  up            Bring up the whole stack"
 	@echo "  down          Stop everything (keep volumes)"
 	@echo "  clean         Stop and wipe volumes (DATA LOSS)"
@@ -12,6 +13,9 @@ help:
 	@echo "  ps / status   Show container state"
 	@echo "  build         Rebuild service images"
 	@echo "  kafka-topics  List Kafka topics"
+
+setup:
+	@bash scripts/setup.sh
 
 up:
 	$(COMPOSE) up -d --build

@@ -1,0 +1,62 @@
+# Git hooks for the backend monorepo (https://lefthook.dev).
+#
+# Installed automatically via `npm install` (the prepare script in
+# package.json runs `lefthook install`). To install manually:
+# `npx lefthook install`.
+#
+# Strategy:
+#   pre-commit  – fast, per-file. ESLint --fix + Ruff --fix on STAGED
+#                 files only. Auto-restages anything fixed.
+#   pre-push    – per-service full lint. Globs filter so unchanged
+#                 services don't pay the cost.
+#
+# Prereqs (one-time per developer):
+#   - gateway/node_modules           (cd gateway && npm install)
+#   - services/auth/node_modules     (cd services/auth && npm install)
+#   - uv on PATH for ai-agents       (https://docs.astral.sh/uv/)
+#
+# Skip a hook for one commit: `git commit --no-verify`
+# Skip a hook for one push:    `git push --no-verify`
+
+pre-commit:
+  parallel: true
+  jobs:
+    - name: eslint-gateway
+      glob: "gateway/**/*.ts"
+      root: gateway
+      run: npx eslint --fix --max-warnings 0 {staged_files}
+      stage_fixed: true
+
+    - name: eslint-auth
+      glob: "services/auth/**/*.ts"
+      root: services/auth
+      run: npx eslint --fix --max-warnings 0 {staged_files}
+      stage_fixed: true
+
+    # `uvx ruff` provisions ruff in an ephemeral env — no need to
+    # install Python deps locally just to lint.
+    - name: ruff-ai-agents
+      glob: "services/ai-agents/**/*.py"
+      root: services/ai-agents
+      run: uvx ruff check --fix {staged_files}
+      stage_fixed: true
+
+pre-push:
+  parallel: true
+  jobs:
+    # Each job's `glob` matches files being pushed. If your push only
+    # touches docs/ or one service, the others' linters don't run.
+    - name: lint-gateway
+      glob: "gateway/**"
+      root: gateway
+      run: npm run lint
+
+    - name: lint-auth
+      glob: "services/auth/**"
+      root: services/auth
+      run: npm run lint
+
+    - name: lint-ai-agents
+      glob: "services/ai-agents/**"
+      root: services/ai-agents
+      run: uvx ruff check .

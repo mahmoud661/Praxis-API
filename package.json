@@ -1,0 +1,11 @@
+{
+  "name": "backend-tools",
+  "private": true,
+  "description": "Repo-root tooling only: lefthook for git hooks. Service code lives under gateway/ and services/*.",
+  "scripts": {
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "lefthook": "^2.1.8"
+  }
+}

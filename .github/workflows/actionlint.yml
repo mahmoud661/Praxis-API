@@ -1,0 +1,42 @@
+# Static check for every GitHub Actions workflow file.
+#
+# Catches the kind of bugs that have eaten runner minutes recently:
+#   - Stray characters at the top of a YAML file (the "Oh." prefix)
+#   - Unknown inputs to actions (`python-version` on setup-uv@v3)
+#   - Shell script issues in `run:` blocks (via shellcheck)
+#
+# Runs ONLY when workflow files change — cheap.
+
+name: actionlint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download actionlint
+        id: get
+        run: bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+        shell: bash
+
+      - name: Run actionlint
+        run: ${{ steps.get.outputs.executable }} -color
+        shell: bash
