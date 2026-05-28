@@ -23,7 +23,6 @@ RUN addgroup -S app && adduser -S app -G app
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
-COPY migrations ./migrations
 USER app
 EXPOSE 3001
 CMD ["node", "dist/main.js"]

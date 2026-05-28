@@ -22,7 +22,6 @@ export type Env = z.infer<typeof schema> & {
 export function loadEnv(): Env {
   const parsed = schema.safeParse(process.env);
   if (!parsed.success) {
-    // eslint-disable-next-line no-console
     console.error("Invalid env:", parsed.error.flatten().fieldErrors);
     process.exit(1);
   }

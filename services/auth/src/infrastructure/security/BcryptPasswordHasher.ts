@@ -1,10 +1,17 @@
 import bcrypt from "bcrypt";
+import { inject, injectable } from "tsyringe";
 import { PasswordHasher } from "../../domain/ports/PasswordHasher";
 import { PasswordHash } from "../../domain/value-objects/PasswordHash";
 import { ValidationException } from "../../domain/shared/DomainException";
+import { ENV_TOKEN, Env } from "../config/Env";
 
+@injectable()
 export class BcryptPasswordHasher implements PasswordHasher {
-  constructor(private readonly rounds: number) {}
+  private readonly rounds: number;
+
+  constructor(@inject(ENV_TOKEN) env: Env) {
+    this.rounds = env.BCRYPT_ROUNDS;
+  }
 
   async hash(plain: string): Promise<PasswordHash> {
     if (plain.length < 8 || plain.length > 128) {

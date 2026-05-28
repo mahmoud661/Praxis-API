@@ -3,26 +3,32 @@
 import "reflect-metadata";
 import "dotenv/config";
 import { container } from "tsyringe";
-import { buildContainer } from "./composition-root";
-import { runMigrations } from "./infrastructure/persistence/migrations";
-import { ExpressAppFactory } from "./presentation/http/ExpressAppFactory";
+import Redis from "ioredis";
+import { Server } from "http";
+import { registerDependencies } from "./presentation/di/container";
+import { AppDataSource } from "./infrastructure/database/data-source";
+import { AppServer } from "./presentation/http/app-server";
+import { OutboxPoller } from "./infrastructure/messaging/OutboxPoller";
+import { REDIS_TOKEN } from "./infrastructure/config/tokens";
 import { LOGGER, Logger } from "./domain/ports/Logger";
 
 const SHUTDOWN_DEADLINE_MS = 15_000;
 
 async function main(): Promise<void> {
-  const handles = buildContainer();
+  // Wire the container (registers env, adapters, and auto-discovers repos +
+  // services by convention).
+  await registerDependencies();
   const logger = container.resolve<Logger>(LOGGER);
 
-  await runMigrations(handles.pgConn, logger);
-  await handles.outboxPoller.start();
+  // Connect + sync schema from entities (dev). No migration step.
+  await AppDataSource.initialize();
+  logger.info("database connected & schema synced");
 
-  const factory = container.resolve(ExpressAppFactory);
-  const app = factory.build();
+  const poller = container.resolve(OutboxPoller);
+  await poller.start();
 
-  const server = app.listen(handles.env.PORT, () => {
-    logger.info("auth-service listening", { port: handles.env.PORT });
-  });
+  const server: Server = await container.resolve(AppServer).listen();
+  const redis = container.resolve<Redis>(REDIS_TOKEN);
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
@@ -30,9 +36,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     logger.info("shutting down", { signal });
 
-    // Stop accepting new connections, then wait for in-flight requests to
-    // finish (up to a deadline). This is the actual "drain" — server.close()
-    // only does it correctly if we await its callback.
+    // Drain: stop accepting connections, wait for in-flight requests.
     await new Promise<void>((resolve) => {
       const deadline = setTimeout(() => {
         logger.warn("shutdown drain timed out; forcing close");
@@ -44,9 +48,9 @@ async function main(): Promise<void> {
       });
     });
 
-    await handles.outboxPoller.stop().catch(() => undefined);
-    await handles.redis.quit().catch(() => undefined);
-    await handles.pgConn.close().catch(() => undefined);
+    await poller.stop().catch(() => undefined);
+    await redis.quit().catch(() => undefined);
+    await AppDataSource.destroy().catch(() => undefined);
     process.exit(0);
   };
 
@@ -55,7 +59,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  // eslint-disable-next-line no-console
   console.error("fatal", err);
   process.exit(1);
 });

@@ -1,6 +1,8 @@
 import { CompressionTypes, Kafka, Producer, logLevel } from "kafkajs";
-import { PostgresConnection } from "../persistence/PostgresConnection";
-import { Logger } from "../../domain/ports/Logger";
+import { inject, injectable } from "tsyringe";
+import { Logger, LOGGER } from "../../domain/ports/Logger";
+import { ENV_TOKEN, Env } from "../config/Env";
+import { AppDataSource } from "../database/data-source";
 
 // Background worker: every `intervalMs`, claims a small batch of unpublished
 // outbox rows, sends them to Kafka, then marks them published. Uses
@@ -15,23 +17,23 @@ interface PendingRow {
   headers: Record<string, string>;
 }
 
+@injectable()
 export class OutboxPoller {
   private readonly kafka: Kafka;
   private producer: Producer | null = null;
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private readonly intervalMs: number;
+  private readonly batchSize = 100;
 
   constructor(
-    private readonly conn: PostgresConnection,
-    brokers: string[],
-    clientId: string,
-    private readonly logger: Logger,
-    private readonly intervalMs: number,
-    private readonly batchSize: number = 100,
+    @inject(LOGGER) private readonly logger: Logger,
+    @inject(ENV_TOKEN) env: Env,
   ) {
+    this.intervalMs = env.OUTBOX_POLL_INTERVAL_MS;
     this.kafka = new Kafka({
-      brokers,
-      clientId: `${clientId}-outbox`,
+      brokers: env.kafkaBrokers,
+      clientId: `${env.serviceName}-outbox`,
       logLevel: logLevel.WARN,
       retry: { initialRetryTime: 300, retries: 8 },
     });
@@ -58,10 +60,11 @@ export class OutboxPoller {
   }
 
   private async tick(): Promise<void> {
-    const client = await this.conn.pool.connect();
+    const qr = AppDataSource.createQueryRunner();
+    await qr.connect();
     try {
-      await client.query("BEGIN");
-      const { rows } = await client.query<PendingRow>(
+      await qr.startTransaction();
+      const rows: PendingRow[] = await qr.query(
         `SELECT id, aggregate_id, topic, event_name, payload, headers
            FROM outbox
           WHERE published_at IS NULL
@@ -71,7 +74,7 @@ export class OutboxPoller {
         [this.batchSize],
       );
       if (rows.length === 0) {
-        await client.query("COMMIT");
+        await qr.commitTransaction();
         return;
       }
 
@@ -92,7 +95,9 @@ export class OutboxPoller {
           messages: batch.map((r) => ({
             key: r.aggregate_id,
             value:
-              typeof r.payload === "string" ? r.payload : JSON.stringify(r.payload),
+              typeof r.payload === "string"
+                ? r.payload
+                : JSON.stringify(r.payload),
             headers: Object.fromEntries(
               Object.entries(r.headers).map(([k, v]) => [k, String(v)]),
             ),
@@ -100,17 +105,17 @@ export class OutboxPoller {
         });
       }
 
-      await client.query(
+      await qr.query(
         `UPDATE outbox SET published_at = now() WHERE id = ANY($1::uuid[])`,
         [rows.map((r) => r.id)],
       );
-      await client.query("COMMIT");
+      await qr.commitTransaction();
       this.logger.debug("outbox flushed", { count: rows.length });
     } catch (err) {
-      await client.query("ROLLBACK").catch(() => undefined);
+      await qr.rollbackTransaction().catch(() => undefined);
       this.logger.error("outbox tick failed", { err: (err as Error).message });
     } finally {
-      client.release();
+      await qr.release();
     }
   }
 }

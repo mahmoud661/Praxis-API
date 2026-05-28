@@ -1,15 +1,16 @@
 import pino, { Logger as Pino } from "pino";
-import { injectable } from "tsyringe";
+import { inject, injectable } from "tsyringe";
 import { Logger } from "../../domain/ports/Logger";
+import { ENV_TOKEN, Env } from "../config/Env";
 
 @injectable()
 export class PinoLoggerAdapter implements Logger {
   private readonly p: Pino;
 
-  constructor(serviceName: string, level: pino.Level = "info") {
+  constructor(@inject(ENV_TOKEN) env: Env) {
     this.p = pino({
-      level,
-      base: { service: serviceName },
+      level: env.NODE_ENV === "production" ? "info" : "debug",
+      base: { service: env.serviceName },
       timestamp: pino.stdTimeFunctions.isoTime,
     });
   }
