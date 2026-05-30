@@ -327,12 +327,21 @@ services:
       OTEL_SERVICE_NAME: ai-agents-service
       PORT: ${AGENTS_PORT:-8000}
       DATABASE_URL: ${AGENTS_DATABASE_URL}
+      REDIS_URL: ${REDIS_URL_INTERNAL}
       KAFKA_BROKERS: ${KAFKA_BROKERS_INTERNAL}
+      # LiteLLM proxy is the active model provider (OpenAI-compatible).
+      LITELLM_PROXY_API_BASE: ${LITELLM_PROXY_API_BASE}
+      LITELLM_PROXY_API_KEY: ${LITELLM_PROXY_API_KEY}
+      LITELLM_MODEL: ${LITELLM_MODEL}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
+      # Direct-provider keys kept for future code paths but unused by the
+      # active agent (which routes through the LiteLLM proxy above).
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       KAFKA_MAX_HANDLER_ATTEMPTS: ${KAFKA_MAX_HANDLER_ATTEMPTS:-3}
     depends_on:
       postgres-agents: { condition: service_healthy }
+      redis: { condition: service_healthy }
       kafka: { condition: service_healthy }
       kafka-init: { condition: service_completed_successfully }
     <<: *app-defaults

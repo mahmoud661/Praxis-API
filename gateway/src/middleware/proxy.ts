@@ -1,6 +1,7 @@
 import { createProxyMiddleware, Options, fixRequestBody } from "http-proxy-middleware";
-import type { Request, Response } from "express";
-import type { ClientRequest } from "http";
+import type { RequestHandler, Request, Response } from "express";
+import type { ClientRequest, IncomingMessage } from "http";
+import type { Socket } from "net";
 
 // Builds a proxy that forwards to a downstream internal service.
 //
@@ -48,5 +49,28 @@ export function makeServiceProxy(opts: {
         }
       },
     },
+  });
+}
+
+/**
+ * WebSocket-aware proxy. Returns both the Express middleware (for path
+ * matching) and the `upgrade` handler the HTTP server attaches to its
+ * `upgrade` event. Session auth runs in `main.ts`'s upgrade handler BEFORE
+ * this proxy sees the request — so by here we've already injected
+ * `X-User-Id` on the upgrade request headers.
+ */
+export function makeWsProxy(opts: {
+  target: string;
+  pathRewrite?: Options["pathRewrite"];
+}): RequestHandler & {
+  upgrade?: (req: IncomingMessage, socket: Socket, head: Buffer) => void;
+} {
+  return createProxyMiddleware({
+    target: opts.target,
+    changeOrigin: true,
+    ws: true,
+    pathRewrite: opts.pathRewrite,
+    proxyTimeout: 0, // WS streams can be long-lived; no proxy timeout
+    timeout: 0,
   });
 }
