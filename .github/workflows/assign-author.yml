@@ -1,0 +1,68 @@
+# Auto-assign newly-opened PRs to their author.
+#
+# Why: a PR's "assignee" is the human responsible for moving it forward
+# (rebasing, addressing comments, merging). For most PRs that's the
+# author, but GitHub doesn't set this by default — leaving every new
+# PR with no assignee, which makes the "assigned to me" filter useless
+# for tracking what you owe.
+#
+# Triggered ONLY on the initial `opened` event — not `reopened`, not
+# `synchronize`. If a maintainer later reassigns the PR to someone
+# else (e.g. handing off rebase responsibility), this won't fight
+# them: the `if assignees.length === 0` guard makes it truly one-shot
+# per PR.
+#
+# Uses `pull_request_target` so it works for PRs from forks too — the
+# step only calls `issues.addAssignees`, no untrusted code runs.
+
+name: assign-author
+
+on:
+  pull_request_target:
+    types: [opened]
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const author = pr.user?.login;
+
+            // Skip bots — they don't need an assignee, and the GitHub API
+            // refuses to assign accounts of type "Bot" anyway.
+            if (!author || pr.user?.type === "Bot") {
+              console.log(`Skipping: author is missing or a bot (${pr.user?.type}).`);
+              return;
+            }
+
+            // Respect any manual assignment that beat us to it. This can
+            // happen when a maintainer opens a PR on someone else's
+            // behalf and sets the assignee in the same action.
+            if (pr.assignees && pr.assignees.length > 0) {
+              const names = pr.assignees.map(a => a.login).join(", ");
+              console.log(`Skipping: PR already has assignees (${names}).`);
+              return;
+            }
+
+            try {
+              await github.rest.issues.addAssignees({
+                owner, repo,
+                issue_number: pr.number,
+                assignees: [author],
+              });
+              console.log(`Assigned PR #${pr.number} to @${author}.`);
+            } catch (err) {
+              // Most common cause: the author isn't a repo collaborator
+              // and can't be assigned. Log and exit cleanly rather than
+              // failing the workflow — assignment is a convenience, not
+              // a gate.
+              console.log(`Could not assign @${author}: ${err.message}`);
+            }
