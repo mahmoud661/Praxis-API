@@ -1,0 +1,177 @@
+"""
+REST controller for `/v1/threads`. Pure HTTP shape — all the work happens in
+`IThreadsService`.
+
+Response models are Pydantic so OpenAPI is accurate; conversion from the
+dataclass DTOs is one-liner. Keeping the wire shape stable here means future
+internal DTO refactors don't ripple to the frontend.
+"""
+
+from __future__ import annotations
+
+from fastapi import Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from ...application.services._errors import ThreadNotFoundError
+from ...domain.dtos.thread_dto import ThreadView
+from ...domain.IServices.i_threads_service import IThreadsService
+from ..http.dependencies import current_user_id
+
+
+class ThreadResponse(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_view(cls, t: ThreadView) -> "ThreadResponse":
+        return cls(
+            id=t.id,
+            title=t.title,
+            created_at=t.created_at,
+            updated_at=t.updated_at,
+        )
+
+
+class ThreadListResponse(BaseModel):
+    threads: list[ThreadResponse]
+
+
+class CreateThreadBody(BaseModel):
+    # Optional — defaults to "New conversation" service-side.
+    title: str | None = Field(default=None, max_length=120)
+
+
+class HistoryToolCallResponse(BaseModel):
+    id: str
+    name: str
+    args: dict
+    # `null` if the tool hasn't reported back yet (which only happens
+    # mid-stream — the history endpoint reads a settled checkpoint so in
+    # practice this is always populated, but the shape mirrors the
+    # frontend's live-stream representation).
+    result: str | None = None
+
+
+class HistoryMessageResponse(BaseModel):
+    id: str
+    role: str
+    content: str
+    tool_calls: list[HistoryToolCallResponse] = Field(default_factory=list)
+
+
+class HistoryResponse(BaseModel):
+    messages: list[HistoryMessageResponse]
+    # Pagination metadata — populated only by the paginated endpoint, but
+    # safe to include on the full-history response too (defaults make
+    # it look "complete"). Lets the frontend share one wire shape.
+    has_more: bool = False
+    next_cursor: str | None = None
+
+
+class ThreadsController:
+    """Container resolves `service: IThreadsService` from token "IThreadsService"."""
+
+    def __init__(self, service: IThreadsService) -> None:
+        self._service = service
+
+    async def list_threads(
+        self, user_id: str = Depends(current_user_id)
+    ) -> ThreadListResponse:
+        threads = await self._service.list_for_owner(user_id)
+        return ThreadListResponse(
+            threads=[ThreadResponse.from_view(t) for t in threads]
+        )
+
+    async def create_thread(
+        self,
+        body: CreateThreadBody,
+        user_id: str = Depends(current_user_id),
+    ) -> ThreadResponse:
+        thread = await self._service.create(owner_id=user_id, title=body.title)
+        return ThreadResponse.from_view(thread)
+
+    async def get_thread(
+        self, thread_id: str, user_id: str = Depends(current_user_id)
+    ) -> ThreadResponse:
+        try:
+            thread = await self._service.get(thread_id=thread_id, owner_id=user_id)
+        except ThreadNotFoundError:
+            raise HTTPException(status_code=404, detail={"error": "NOT_FOUND"})
+        return ThreadResponse.from_view(thread)
+
+    async def delete_thread(
+        self, thread_id: str, user_id: str = Depends(current_user_id)
+    ):
+        # No return-type annotation on purpose — FastAPI auto-builds a
+        # response field from the annotation, which clashes with the 204
+        # status code ("must not have a body").
+        try:
+            await self._service.delete(thread_id=thread_id, owner_id=user_id)
+        except ThreadNotFoundError:
+            raise HTTPException(status_code=404, detail={"error": "NOT_FOUND"})
+
+    async def thread_history(
+        self,
+        thread_id: str,
+        user_id: str = Depends(current_user_id),
+        limit: int | None = Query(
+            default=None,
+            ge=1,
+            le=200,
+            description=(
+                "Page size. When set, the endpoint returns at most this "
+                "many messages and includes pagination cursors."
+            ),
+        ),
+        before: str | None = Query(
+            default=None,
+            description=(
+                "Message id cursor. Returns the page that ends just "
+                "before this message — i.e. the next-older page."
+            ),
+        ),
+    ) -> HistoryResponse:
+        try:
+            if limit is None and before is None:
+                # Back-compat: no pagination params → full history, all in
+                # one response (matches the original wire shape).
+                messages = await self._service.load_messages(
+                    thread_id=thread_id, owner_id=user_id
+                )
+                page_has_more = False
+                page_cursor: str | None = None
+            else:
+                page = await self._service.load_messages_page(
+                    thread_id=thread_id,
+                    owner_id=user_id,
+                    limit=limit or 30,
+                    before=before,
+                )
+                messages = list(page.messages)
+                page_has_more = page.has_more
+                page_cursor = page.next_cursor
+        except ThreadNotFoundError:
+            raise HTTPException(status_code=404, detail={"error": "NOT_FOUND"})
+        return HistoryResponse(
+            messages=[
+                HistoryMessageResponse(
+                    id=m.id,
+                    role=m.role,
+                    content=m.content,
+                    tool_calls=[
+                        HistoryToolCallResponse(
+                            id=tc.id,
+                            name=tc.name,
+                            args=tc.args,
+                            result=tc.result,
+                        )
+                        for tc in m.tool_calls
+                    ],
+                )
+                for m in messages
+            ],
+            has_more=page_has_more,
+            next_cursor=page_cursor,
+        )

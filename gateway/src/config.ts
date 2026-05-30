@@ -27,7 +27,6 @@ export type GatewayConfig = z.infer<typeof schema> & {
 export function loadConfig(): GatewayConfig {
   const parsed = schema.safeParse(process.env);
   if (!parsed.success) {
-    // eslint-disable-next-line no-console
     console.error("Invalid gateway env:", parsed.error.flatten().fieldErrors);
     process.exit(1);
   }

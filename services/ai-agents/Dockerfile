@@ -17,8 +17,6 @@ RUN uv pip install --system --no-cache -r requirements.txt
 COPY app ./app
 COPY tests ./tests
 COPY pytest.ini ./
-COPY alembic.ini ./
-COPY migrations ./migrations
 
 # Gate: tests fail → build fails → no image → container can't start with
 # broken code. Runs offline (in-memory fakes only; no Kafka / Postgres).
