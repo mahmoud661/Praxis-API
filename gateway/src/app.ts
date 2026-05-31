@@ -12,7 +12,7 @@ import {
   makeAttachSession,
   requireSession,
 } from "./middleware/session.middleware";
-import { makeServiceProxy } from "./middleware/proxy";
+import { makeServiceProxy, makeWsProxy } from "./middleware/proxy";
 import { makePerIdentityRateLimit } from "./middleware/rate-limit";
 import { makeIdempotency } from "./middleware/idempotency";
 import {
@@ -20,12 +20,20 @@ import {
   makeCircuitBreakerMiddleware,
 } from "./middleware/circuit-breaker";
 
+export interface GatewayHandles {
+  app: express.Express;
+  /** WebSocket proxy for `/v1/ws/*` → ai-agents-service `/ws/*`. main.ts
+   *  attaches its `.upgrade` to the HTTP server's `upgrade` event after
+   *  the session auth runs in that handler. */
+  wsProxy: ReturnType<typeof makeWsProxy>;
+}
+
 export function buildApp(deps: {
   config: GatewayConfig;
   resolver: SessionResolver;
   redis: Redis;
   logger: Logger;
-}): express.Express {
+}): GatewayHandles {
   const { config, resolver, redis, logger } = deps;
   const app = express();
 
@@ -127,6 +135,21 @@ export function buildApp(deps: {
     }),
   );
 
+  // /v1/threads/* — same upstream (ai-agents). Conversation CRUD + history.
+  app.use(
+    "/v1/threads",
+    attachSession,
+    requireSession,
+    perIdentityLimit,
+    idempotency,
+    makeCircuitBreakerMiddleware(agentsBreaker),
+    makeServiceProxy({
+      target: config.AI_AGENTS_SERVICE_URL,
+      requireAuth: true,
+      pathRewrite: reprefix("/threads"),
+    }),
+  );
+
   // -----------------------------------------------------------------
   // Legacy paths (no version prefix) — kept as alias for backward compat,
   // marked Deprecated. Remove once all clients move to /v1.
@@ -166,11 +189,29 @@ export function buildApp(deps: {
     }),
   );
 
+  // WebSocket proxy: /v1/ws/agents/{tid}, /v1/ws/notifications → ai-agents
+  // /ws/agents/{tid}, /ws/notifications. Session auth happens in main.ts's
+  // server.on('upgrade') handler BEFORE this proxy sees the request, so it
+  // can reject unauthenticated upgrades cleanly. The HTTP-level middleware
+  // below is a 426 fallback for clients that mistakenly hit /v1/ws/* without
+  // an Upgrade header.
+  const wsProxy = makeWsProxy({
+    target: config.AI_AGENTS_SERVICE_URL,
+    pathRewrite: { "^/v1/ws": "/ws" },
+  });
+  app.use("/v1/ws", (req, res) => {
+    res
+      .status(426)
+      .set("Upgrade", "websocket")
+      .json({ error: "UPGRADE_REQUIRED", path: req.path });
+  });
+
   app.use((_req, res) => res.status(404).json({ error: "NOT_FOUND" }));
 
   logger.info("gateway routes wired", {
     versions: ["v1"],
     breakers: [authBreaker.name, agentsBreaker.name],
+    ws: ["/v1/ws/*"],
   });
-  return app;
+  return { app, wsProxy };
 }

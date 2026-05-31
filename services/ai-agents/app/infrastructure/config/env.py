@@ -11,7 +11,23 @@ class Env(BaseSettings):
 
     database_url: str
     kafka_brokers: str  # comma-separated
+    # Redis holds the per-run event buffer the AgentRunner streams into.
+    # Cleared when the run ends (success or error).
+    redis_url: str
 
+    # LiteLLM proxy is the model provider — exposes an OpenAI-compatible
+    # API in front of whichever upstream model is configured on the proxy.
+    # The agent's `ChatOpenAI` client points at `litellm_proxy_api_base` with
+    # `litellm_proxy_api_key`, and asks for `litellm_model` by name.
+    litellm_proxy_api_base: str
+    litellm_proxy_api_key: str
+    litellm_model: str
+    # Master key — used by admin tooling against the proxy, not by the
+    # agent's chat client. Loaded so it's available if/when we need it.
+    litellm_master_key: str | None = None
+
+    # Legacy direct-provider keys — kept optional in case a future code path
+    # needs them, but the active agent goes through the LiteLLM proxy above.
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
 

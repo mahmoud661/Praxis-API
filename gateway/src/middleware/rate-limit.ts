@@ -1,36 +1,42 @@
-import type { Request, Response, NextFunction } from "express";
+import rateLimit from "express-rate-limit";
+import RedisStore, { type RedisReply } from "rate-limit-redis";
 import type Redis from "ioredis";
 
-// Per-identity sliding-window rate limit. Identity = user id if attached,
-// IP otherwise — so authenticated users get one bucket regardless of which
-// IP they come from. Uses a Redis INCR + EXPIRE for atomicity.
+// Per-identity rate limit. Identity = user id when attached, IP otherwise,
+// so authenticated users get one bucket regardless of which IP they come
+// from. Backed by Redis (`rate-limit-redis`) so the count is shared across
+// gateway instances behind a load balancer.
+//
+// Built on `express-rate-limit` rather than a hand-rolled INCR + EXPIRE
+// loop: same Redis semantics, plus CodeQL's `js/missing-rate-limiting`
+// recognises the factory call. Headers (`RateLimit`, `RateLimit-Remaining`)
+// follow the IETF draft via `standardHeaders: 'draft-7'`.
 export function makePerIdentityRateLimit(
   redis: Redis,
   perMinute: number,
-) {
-  return async function rateLimit(
-    req: Request,
-    res: Response,
-    next: NextFunction,
-  ): Promise<void> {
-    try {
-      const id = req.user?.id ?? req.ip ?? "anon";
-      const bucket = Math.floor(Date.now() / 60_000); // minute-aligned key
-      const key = `rl:${id}:${bucket}`;
-      const count = await redis.incr(key);
-      if (count === 1) await redis.expire(key, 60);
-      res.setHeader("X-RateLimit-Limit", String(perMinute));
-      res.setHeader("X-RateLimit-Remaining", String(Math.max(0, perMinute - count)));
-      if (count > perMinute) {
-        res.status(429).json({ error: "RATE_LIMITED" });
-        return;
-      }
-      next();
-    } catch (err) {
-      // Don't kill the request if Redis hiccups — fail open. The dedicated
-      // `/auth/*` rate limit (in-process) still protects credentials.
-      next();
-      void err;
-    }
-  };
+): ReturnType<typeof rateLimit> {
+  return rateLimit({
+    windowMs: 60_000,
+    limit: perMinute,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    // express-rate-limit feeds the key to the store; the user id when
+    // present, otherwise the source IP, otherwise a literal "anon"
+    // bucket (every unauthenticated request without an IP shares it —
+    // unusual in practice, but the bucket has to exist).
+    keyGenerator: (req) => req.user?.id ?? req.ip ?? "anon",
+    handler: (_req, res) => {
+      res.status(429).json({ error: "RATE_LIMITED" });
+    },
+    store: new RedisStore({
+      // `sendCommand` is the abstract bridge to whichever client we
+      // use. ioredis `call()` takes the raw command + args and
+      // returns the same shape rate-limit-redis expects.
+      sendCommand: (...args: string[]) =>
+        redis.call(args[0]!, ...args.slice(1)) as Promise<RedisReply>,
+      // Distinct prefix from sessions / idempotency so the keyspace
+      // is greppable in `redis-cli`.
+      prefix: "rl:",
+    }),
+  });
 }

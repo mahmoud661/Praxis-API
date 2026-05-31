@@ -67,7 +67,7 @@ export function makeIdempotency(redis: Redis) {
     // responses — http-proxy-middleware writes via res.write/end — so for
     // those we rely on the finish handler below.
     const origSend = res.send.bind(res);
-    res.send = (body: any): Response => {
+    res.send = (body: unknown): Response => {
       const contentType = res.getHeader("content-type")?.toString() ?? "application/json";
       const cached: CachedResponse = {
         status: res.statusCode,

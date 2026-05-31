@@ -1,0 +1,83 @@
+# Dependabot v2 — weekly security + minor-version PRs across every
+# package manager this monorepo uses. One ecosystem block per
+# package-manifest location.
+#
+# Grouping strategy: dev dependencies grouped to reduce PR noise;
+# runtime deps stay individual so a single bump has its own PR to
+# review for behavioural changes.
+#
+# Re-run after editing: GitHub picks up changes on the next push to
+# the default branch; force a refresh from Settings → Security →
+# Dependabot.
+
+version: 2
+updates:
+  # ---- gateway (Node / Express) -----------------------------------------
+  - package-ecosystem: npm
+    directory: /gateway
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels: [deps, gateway]
+    commit-message:
+      prefix: deps(gateway)
+    groups:
+      gateway-dev:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  # ---- auth service (Node / TypeORM) ------------------------------------
+  - package-ecosystem: npm
+    directory: /services/auth
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels: [deps, auth-service]
+    commit-message:
+      prefix: deps(auth)
+    groups:
+      auth-dev:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  # ---- ai-agents service (Python via uv / pyproject) --------------------
+  - package-ecosystem: pip
+    directory: /services/ai-agents
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels: [deps, ai-agents-service, python]
+    commit-message:
+      prefix: deps(ai-agents)
+    # LangChain / LangGraph are major-version sensitive — keep them
+    # individual so the upgrade gets a real review.
+    ignore:
+      - dependency-name: "langchain*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "langgraph*"
+        update-types: ["version-update:semver-major"]
+
+  # ---- GitHub Actions ---------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Etc/UTC
+    labels: [deps, ci]
+    commit-message:
+      prefix: deps(actions)
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]

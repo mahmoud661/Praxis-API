@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, WebSocket
+from starlette.status import WS_1008_POLICY_VIOLATION
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,3 +55,17 @@ async def current_user_id(
     if not x_user_id:
         raise HTTPException(status_code=401, detail={"error": "UNAUTHENTICATED"})
     return x_user_id
+
+
+async def ws_authenticate(ws: WebSocket) -> str | None:
+    """WebSocket equivalent of `current_user_id`. On a connection upgrade,
+    Starlette reads HTTP headers — the gateway forwards `X-User-Id` for WS
+    just like it does for HTTP. If absent, close the socket with the
+    policy-violation code and return None. The caller MUST early-return on
+    None and skip `ws.accept()`."""
+    user_id = ws.headers.get("x-user-id")
+    if not user_id:
+        # Per spec, close on a not-yet-accepted socket sends an HTTP 403.
+        await ws.close(code=WS_1008_POLICY_VIOLATION)
+        return None
+    return user_id
