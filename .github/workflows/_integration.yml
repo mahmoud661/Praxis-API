@@ -57,7 +57,7 @@ jobs:
       # installs the `uv` binary on top.
       - name: Setup Python
         if: inputs.runtime == 'python'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.python-version }}
 
