@@ -33,7 +33,7 @@ setuptools==70.0.0
 # (FastAPI, psycopg, …) and patches them automatically.
 opentelemetry-distro==0.46b0
 opentelemetry-exporter-otlp-proto-http==1.25.0
-opentelemetry-instrumentation-fastapi==0.46b0
+opentelemetry-instrumentation-fastapi==0.63b1
 opentelemetry-instrumentation-psycopg==0.46b0
 opentelemetry-instrumentation-logging==0.46b0
 # Test runner. Kept in the image so the Dockerfile can `RUN pytest` in the
