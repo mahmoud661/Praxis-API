@@ -1,0 +1,23 @@
+# CodeQL configuration for Praxis-API.
+#
+# Wired up in `.github/workflows/codeql.yml` via the `config-file:` input.
+#
+# Currently a thin pass-through — we use the stock `security-and-quality`
+# query pack with no exclusions, so any new code that introduces a real
+# security issue gets caught.
+#
+# Known false-positive: `js/missing-rate-limiting` on
+# `gateway/src/app.ts` (the `/v1/agents` and `/v1/threads` mounts). Both
+# routes ARE rate-limited via `perIdentityLimit` — a Redis-backed
+# sliding-window middleware in `gateway/src/middleware/rate-limit.ts` —
+# but CodeQL only recognises the `express-rate-limit` package's direct
+# `rateLimit()` factory. We DO NOT disable the query (would lose the
+# safety net for any new route added without rate limiting); instead
+# dismiss the two specific alerts in the Security tab with reason
+# "won't fix → false positive" once they materialise on the default
+# branch.
+
+name: Praxis-API CodeQL config
+
+queries:
+  - uses: security-and-quality

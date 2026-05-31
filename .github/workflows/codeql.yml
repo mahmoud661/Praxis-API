@@ -45,10 +45,12 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-          # `security-and-quality` includes everything in `security-extended`
-          # plus maintainability/correctness queries. Trade-off: a bit
-          # more noise, but catches more genuine bugs.
-          queries: security-and-quality
+          # Repo-level tuning + query pack selection lives in this
+          # config file. Currently a thin pass-through over
+          # `security-and-quality` (security-extended + maintainability/
+          # correctness queries) — adjust there, not here, when you
+          # need to tune.
+          config-file: ./.github/codeql/codeql-config.yml
 
       # No custom build step. Both stacks are interpreted; CodeQL's
       # autobuild handles dependency resolution where needed (Python
