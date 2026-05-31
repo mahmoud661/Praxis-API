@@ -196,6 +196,9 @@ def _get_max_input_tokens(model) -> int | None:
             if isinstance(v, int):
                 return v
     except Exception:
+        # Best-effort introspection. `profile` is provider-specific and
+        # any access can raise (attribute, key, type) — falling back to
+        # the conservative default below is correct, not exceptional.
         pass
     return None
 
@@ -524,6 +527,10 @@ def _get_thread_id(fallback: str) -> str:
         if tid is not None:
             return str(tid)
     except Exception:
+        # `get_config()` raises when called outside a LangGraph run
+        # (e.g. unit tests instantiating the middleware directly). The
+        # fallback ID keeps logging useful without forcing every caller
+        # to set up a graph context.
         pass
     return fallback
 

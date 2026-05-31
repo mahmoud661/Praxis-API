@@ -1,7 +1,6 @@
 """Sequential Tool Node - runs tools one after another instead of in parallel."""
 
 import asyncio
-import logging
 from typing import Any, Union
 
 from langchain_core.messages import AnyMessage
@@ -10,8 +9,6 @@ from langgraph.prebuilt import ToolNode
 from langgraph.prebuilt.tool_node import ToolRuntime, get_config_list
 from langgraph.runtime import Runtime
 from pydantic import BaseModel
-
-logger = logging.getLogger(__name__)
 
 
 class SequentialToolNode(ToolNode):

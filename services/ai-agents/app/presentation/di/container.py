@@ -46,13 +46,23 @@ from ..controllers.health_controller import HealthController
 from ..controllers.threads_controller import ThreadsController
 from ..controllers.turns_controller import TurnsController
 # Routes are auto-mounted by `mount_routes()` scanning presentation/routes/.
-# These imports are unused locally but they make the route classes discoverable
-# even if a future packaging step tree-shakes unreferenced modules.
-from ..routes.agents_runs_route import AgentsRunsRoute  # noqa: F401
-from ..routes.agents_ws_route import AgentsWsRoute  # noqa: F401
-from ..routes.notifications_ws_route import NotificationsWsRoute  # noqa: F401
-from ..routes.threads_route import ThreadsRoute  # noqa: F401
-from ..routes.turns_route import TurnsRoute  # noqa: F401
+# Importing each module triggers its `BaseRoute` subclass registration;
+# binding the classes into the `_AUTO_MOUNT_ROUTES` tuple below makes the
+# references semantic (so ruff F401 + CodeQL `py/unused-import` both stay
+# quiet) and keeps a future packaging step from tree-shaking the modules.
+from ..routes.agents_runs_route import AgentsRunsRoute
+from ..routes.agents_ws_route import AgentsWsRoute
+from ..routes.notifications_ws_route import NotificationsWsRoute
+from ..routes.threads_route import ThreadsRoute
+from ..routes.turns_route import TurnsRoute
+
+_AUTO_MOUNT_ROUTES: tuple[type, ...] = (
+    AgentsRunsRoute,
+    AgentsWsRoute,
+    NotificationsWsRoute,
+    ThreadsRoute,
+    TurnsRoute,
+)
 
 _APP_ROOT = Path(__file__).resolve().parents[2]  # .../app/
 

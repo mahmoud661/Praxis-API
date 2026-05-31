@@ -199,6 +199,11 @@ class RunManager:
             try:
                 await t
             except (asyncio.CancelledError, Exception):
+                # Shutdown drain — we just cancelled these tasks
+                # ourselves on the line above, so CancelledError is the
+                # expected outcome. Any other exception was the task's
+                # own runtime error which has nowhere useful to surface
+                # during process shutdown.
                 pass
 
     def is_active(self, thread_id: str) -> bool:

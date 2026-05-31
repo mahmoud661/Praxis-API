@@ -8,13 +8,20 @@ from ..dtos.thread_dto import HistoryMessageView, HistoryPageView, ThreadView
 
 
 class IThreadsService(Protocol):
-    async def create(self, *, owner_id: str, title: str | None = None) -> ThreadView: ...
+    async def create(self, *, owner_id: str, title: str | None = None) -> ThreadView:
+        """Provision a new thread owned by `owner_id`. Title defaults to a
+        placeholder that `maybe_generate_title` later overwrites."""
 
-    async def list_for_owner(self, owner_id: str) -> list[ThreadView]: ...
+    async def list_for_owner(self, owner_id: str) -> list[ThreadView]:
+        """Every thread the owner can see, newest-first."""
 
-    async def get(self, *, thread_id: str, owner_id: str) -> ThreadView: ...
+    async def get(self, *, thread_id: str, owner_id: str) -> ThreadView:
+        """Single-thread fetch. Raises if the thread doesn't exist or isn't
+        owned by `owner_id` — the access check is part of the contract."""
 
-    async def delete(self, *, thread_id: str, owner_id: str) -> None: ...
+    async def delete(self, *, thread_id: str, owner_id: str) -> None:
+        """Drop the thread + its checkpointer state. Same access check as
+        `get`; idempotent on the repo side."""
 
     async def load_messages(
         self, *, thread_id: str, owner_id: str

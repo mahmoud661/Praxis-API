@@ -65,6 +65,8 @@ class NotificationsWsRoute(BaseRoute):
                     continue
                 await ws.send_json(payload)
         except WebSocketDisconnect:
+            # Client closed the socket — expected lifecycle event for
+            # the sidebar notifications stream. No diagnostic value.
             pass
         finally:
             try:

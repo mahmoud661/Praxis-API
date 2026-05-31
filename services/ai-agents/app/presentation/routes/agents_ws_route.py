@@ -123,6 +123,8 @@ class AgentsWsRoute(BaseRoute):
                 if exc and not isinstance(exc, WebSocketDisconnect):
                     raise exc
         except WebSocketDisconnect:
+            # Client closed the socket — the expected, normal outcome
+            # of any chat session. No diagnostic value in logging.
             pass
         finally:
             for task in (reader_task, writer_task):
@@ -131,6 +133,10 @@ class AgentsWsRoute(BaseRoute):
                     try:
                         await task
                     except (asyncio.CancelledError, Exception):
+                        # Cleanup drain: the task was cancelled by the
+                        # line above; CancelledError is what we expect.
+                        # Any other error came from the task and has
+                        # nowhere useful to surface from cleanup.
                         pass
             # IMPORTANT: do NOT cancel the run. Disconnect ≠ cancel — the
             # whole point is the run keeps going so the user can reconnect.
