@@ -1,14 +1,19 @@
-# Updates the draft release on every merge to `main` and on PR
-# labelling (so re-labelling an open PR re-categorises it before
-# merge). Reads config from `.github/release-drafter.yml`.
+# Updates the draft release on every merge to `main`. Reads config
+# from `.github/release-drafter.yml`.
+#
+# `pull_request` trigger is intentionally OMITTED: release-drafter
+# reads its config from the default branch only — it cannot see a
+# config file that lives on a feature branch. Including the trigger
+# would make every PR run fail with "config not found" until the
+# config eventually lands on `main`. PR-label re-categorisation is
+# the only feature lost; the draft still updates the moment a PR
+# merges with its final labels attached.
 
 name: release-drafter
 
 on:
   push:
     branches: [main]
-  pull_request:
-    types: [opened, reopened, synchronize, edited, labeled, unlabeled]
 
 permissions:
   contents: read
