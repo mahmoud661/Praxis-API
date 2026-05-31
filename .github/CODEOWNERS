@@ -1,0 +1,30 @@
+# GitHub-native CODEOWNERS — auto-requests review from the matching
+# owner(s) when a PR touches the listed paths. Last-match-wins,
+# mirroring how GitHub evaluates the file.
+#
+# Distinct from `.github/OWNERS` (used by the custom pr-welcome-comment
+# workflow). Keep both in sync when adding new areas.
+#
+# Syntax: <pattern> <@owner> [@other ...]
+#   * a leading `/` anchors to the repo root
+#   * a trailing `/` matches a directory
+#   * `*` matches anything except `/`
+#   * `**` matches anything
+
+# Default owner — every file unless overridden below.
+* @mahmoud661
+
+# Service code
+/gateway/                          @mahmoud661
+/services/auth/                    @mahmoud661
+/services/ai-agents/               @mahmoud661
+
+# Cross-cutting infra
+/infra/                            @mahmoud661
+/contracts/                        @mahmoud661
+/.github/                          @mahmoud661
+/lefthook.yml                      @mahmoud661
+
+# Database migrations — same owner today, but keep the rule so
+# adding a DB-specialist reviewer later is a one-line change.
+**/migrations/**                   @mahmoud661

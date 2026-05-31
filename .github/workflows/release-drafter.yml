@@ -1,0 +1,28 @@
+# Updates the draft release on every merge to `main` and on PR
+# labelling (so re-labelling an open PR re-categorises it before
+# merge). Reads config from `.github/release-drafter.yml`.
+
+name: release-drafter
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  update_release_draft:
+    permissions:
+      contents: write       # to create / update the draft release
+      pull-requests: write  # to read labels + write back metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

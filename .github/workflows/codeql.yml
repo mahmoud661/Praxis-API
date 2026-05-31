@@ -1,0 +1,62 @@
+# CodeQL — GitHub's static security analysis. Free for public repos.
+#
+# Languages covered:
+#   - javascript-typescript: gateway + auth (TS/Express)
+#   - python: ai-agents (FastAPI/LangGraph)
+#
+# Trigger strategy:
+#   - push to main: catch security regressions as they land
+#   - pull_request to main: catch them BEFORE landing
+#   - weekly schedule: catch new rules / DB releases that flag old code
+#
+# Findings appear at Security → Code scanning alerts. Severity-based
+# alerts also surface inline on the PR diff that introduced them.
+
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 06:00 UTC — same cadence as Dependabot so the security
+    # signal lands together.
+    - cron: "0 6 * * 1"
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, python]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          # `security-and-quality` includes everything in `security-extended`
+          # plus maintainability/correctness queries. Trade-off: a bit
+          # more noise, but catches more genuine bugs.
+          queries: security-and-quality
+
+      # No custom build step. Both stacks are interpreted; CodeQL's
+      # autobuild handles dependency resolution where needed (Python
+      # imports for taint flow analysis).
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

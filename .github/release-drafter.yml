@@ -1,0 +1,65 @@
+# Release Drafter — assembles draft release notes from merged PRs.
+# Docs: https://github.com/release-drafter/release-drafter
+#
+# Workflow: every PR merged to `main` updates a single DRAFT release.
+# When you're ready to ship, edit the draft + click Publish. The
+# changelog writes itself by collecting PR titles, grouped by label.
+#
+# Labels map to changelog sections via `categories` below. PRs without
+# a matched label land in "Other changes". Use the labels we already
+# manage in `.github/labeler.yml`.
+
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+
+# Semantic versioning resolution — driven by PR labels. A PR labelled
+# `breaking` bumps major; `enhancement` bumps minor; everything else
+# bumps patch. Add a `breaking` label manually when needed.
+version-resolver:
+  major:
+    labels: [breaking, "breaking-change", "major"]
+  minor:
+    labels: [enhancement, feature, minor, ai-agents-service, auth-service, gateway]
+  patch:
+    labels: [bug, fix, patch, deps, ci, docs, infra, contracts, migrations, tests, python, typescript]
+  default: patch
+
+categories:
+  - title: "🚨 Breaking changes"
+    labels: [breaking, "breaking-change", major]
+  - title: "✨ Features"
+    labels: [enhancement, feature, minor]
+  - title: "🐛 Bug fixes"
+    labels: [bug, fix, patch]
+  - title: "🛠 Services"
+    labels: [gateway, auth-service, ai-agents-service]
+  - title: "🏗 Infra & contracts"
+    labels: [infra, contracts, migrations]
+  - title: "🧪 Tests"
+    labels: [tests]
+  - title: "🤖 CI / repo plumbing"
+    labels: [ci]
+  - title: "📚 Docs"
+    labels: [docs]
+  - title: "⬆️ Dependencies"
+    labels: [deps]
+    collapse-after: 5
+
+change-template: "- $TITLE by @$AUTHOR (#$NUMBER)"
+change-title-escapes: '\<*_&'
+no-changes-template: "- No user-visible changes since the last release."
+
+template: |
+  ## What's changed
+
+  $CHANGES
+
+  ## Contributors
+
+  $CONTRIBUTORS
+
+  **Full changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
+
+exclude-labels:
+  - skip-changelog
+  - release
