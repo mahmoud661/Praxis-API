@@ -39,4 +39,4 @@ opentelemetry-instrumentation-logging==0.46b0
 # Test runner. Kept in the image so the Dockerfile can `RUN pytest` in the
 # build stage to gate startup on a passing unit-test suite.
 pytest==8.2.0
-pytest-asyncio==0.23.6
+pytest-asyncio==1.4.0
