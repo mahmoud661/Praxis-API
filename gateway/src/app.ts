@@ -150,6 +150,24 @@ export function buildApp(deps: {
     }),
   );
 
+  // /v1/capabilities — same upstream. Returns the agent catalog +
+  // per-account state the frontend uses to gate the composer (file
+  // upload, tool toggles) at chat boot. Read-only and cheap on the
+  // upstream side (LiteLLM /model/info is cached 5 min), so no
+  // idempotency layer — just session + rate-limit + circuit-breaker.
+  app.use(
+    "/v1/capabilities",
+    attachSession,
+    requireSession,
+    perIdentityLimit,
+    makeCircuitBreakerMiddleware(agentsBreaker),
+    makeServiceProxy({
+      target: config.AI_AGENTS_SERVICE_URL,
+      requireAuth: true,
+      pathRewrite: reprefix("/capabilities"),
+    }),
+  );
+
   // -----------------------------------------------------------------
   // Legacy paths (no version prefix) — kept as alias for backward compat,
   // marked Deprecated. Remove once all clients move to /v1.

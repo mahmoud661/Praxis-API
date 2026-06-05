@@ -28,6 +28,7 @@ from typing import Any, Callable, get_type_hints
 
 from redis.asyncio import Redis
 
+from ...application.services.agentic.agent_registry import AgentRegistry
 from ...application.services.agentic.main_agent import MainAgent
 from ...application.services.agentic.run_manager import RunManager
 from ...application.services.agentic.runner import AgentRunner
@@ -38,10 +39,12 @@ from ...infrastructure.agentic.agentic_store import AgenticStore
 from ...infrastructure.ai.title_generator import TitleGenerator
 from ...infrastructure.cache.event_stream import EventStream
 from ...infrastructure.config.env import load_env
+from ...infrastructure.llm.litellm_client import LiteLLMClient
 from ...infrastructure.logging.structlog_logger import StructlogLogger
 from ...infrastructure.messaging.kafka_event_consumer import KafkaEventConsumer
 from ...infrastructure.messaging.kafka_event_publisher import KafkaEventPublisher
 from ..controllers.agents_runs_controller import AgentsRunsController
+from ..controllers.capabilities_controller import CapabilitiesController
 from ..controllers.health_controller import HealthController
 from ..controllers.threads_controller import ThreadsController
 from ..controllers.turns_controller import TurnsController
@@ -52,6 +55,7 @@ from ..controllers.turns_controller import TurnsController
 # quiet) and keeps a future packaging step from tree-shaking the modules.
 from ..routes.agents_runs_route import AgentsRunsRoute
 from ..routes.agents_ws_route import AgentsWsRoute
+from ..routes.capabilities_route import CapabilitiesRoute
 from ..routes.notifications_ws_route import NotificationsWsRoute
 from ..routes.threads_route import ThreadsRoute
 from ..routes.turns_route import TurnsRoute
@@ -59,6 +63,7 @@ from ..routes.turns_route import TurnsRoute
 _AUTO_MOUNT_ROUTES: tuple[type, ...] = (
     AgentsRunsRoute,
     AgentsWsRoute,
+    CapabilitiesRoute,
     NotificationsWsRoute,
     ThreadsRoute,
     TurnsRoute,
@@ -183,6 +188,35 @@ def register_dependencies() -> Container:
     # until after the lifespan has wired the checkpointer.
     container.register("MainAgent", MainAgent(container.resolve("AgenticStore"), env))
 
+    # LiteLLM admin client — used by the agent registry's boot-time
+    # validation AND the capabilities service for per-agent
+    # `underlying` metadata. Single instance, cached internally.
+    container.register(
+        "LiteLLMClient",
+        LiteLLMClient(
+            base_url=env.litellm_proxy_api_base,
+            master_key=env.litellm_master_key,
+            logger=logger,
+        ),
+    )
+
+    # Agent registry — discovers BaseAgent subclasses in
+    # `application/services/agentic/agents/`. `construct` is the
+    # callable; we hand the container's own `construct` so each agent's
+    # `__init__` annotations get resolved (AgenticStore, Env, etc.).
+    # `.discover()` runs synchronously here so the catalog is populated
+    # before the capabilities service is constructed below.
+    # `.validate_against(litellm)` is async, deferred to the lifespan.
+    registry = AgentRegistry(
+        agents_folder=(
+            _APP_ROOT / "application" / "services" / "agentic" / "agents"
+        ),
+        logger=logger,
+        constructor=container.construct,
+    )
+    registry.discover()
+    container.register("AgentRegistry", registry)
+
     # AgentRunner: streams events from the LangGraph graph through an opaque
     # `on_event` callback. The RunManager wires that callback to the
     # EventStream so a WebSocket disconnect doesn't kill the run.
@@ -263,6 +297,10 @@ def register_dependencies() -> Container:
     container.register(
         "TurnsController",
         TurnsController(container.resolve("ITurnsService")),
+    )
+    container.register(
+        "CapabilitiesController",
+        CapabilitiesController(container.resolve("ICapabilitiesService")),
     )
 
     return container
