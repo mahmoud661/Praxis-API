@@ -26,13 +26,15 @@ from ...domain.dtos.thread_dto import (
     HistoryMessageView,
     HistoryPageView,
     HistoryToolCallView,
+    ThreadConfigView,
     ThreadView,
 )
 from ...domain.IRepos.i_thread_repo import IThreadRepo
 from ...domain.ports.logger import Logger
 from ...infrastructure.agentic.agentic_store import AgenticStore
 from ...infrastructure.ai.title_generator import TitleGenerator
-from ._errors import ThreadNotFoundError  # noqa: F401  (re-export for callers)
+from .agentic.agent_registry import AgentRegistry
+from ._errors import InvalidThreadConfigError, ThreadNotFoundError  # noqa: F401  (re-exports)
 
 
 # Default title used for freshly-created threads — matches ThreadsService.create
@@ -51,6 +53,7 @@ class ThreadsService:
         title_generator: TitleGenerator,
         redis: Redis,
         logger: Logger,
+        agent_registry: AgentRegistry,
     ) -> None:
         # Resolved by the container by annotation class name.
         self._repo = thread_repo
@@ -58,6 +61,7 @@ class ThreadsService:
         self._title_gen = title_generator
         self._redis = redis
         self._logger = logger
+        self._registry = agent_registry
 
     async def create(
         self, *, owner_id: str, title: str | None = None
@@ -95,6 +99,76 @@ class ThreadsService:
         self._logger.info(
             "thread.deleted", thread_id=thread_id, owner_id=owner_id
         )
+
+    async def update_config(
+        self,
+        *,
+        thread_id: str,
+        owner_id: str,
+        config: ThreadConfigView,
+    ) -> ThreadView:
+        """Validate the new config against the agent registry, then
+        persist it. Raises:
+          - `ThreadNotFoundError` if the thread doesn't exist OR the
+            caller doesn't own it (same hidden-existence rule as `get`).
+          - `InvalidThreadConfigError` if `agent_id` is unknown OR a
+            `tool_overrides` entry refers to a tool the agent doesn't
+            expose OR a tool the agent declared non-toggleable.
+        """
+        # Ownership check — 404 on miss-or-foreign.
+        await self.get(thread_id=thread_id, owner_id=owner_id)
+
+        self._validate_config(config)
+        updated = await self._repo.update_config(thread_id, config)
+        if updated is None:
+            # Race: thread deleted between the ownership check and the
+            # write. Treat as not-found.
+            raise ThreadNotFoundError(thread_id)
+        self._logger.info(
+            "thread.config_updated",
+            thread_id=thread_id,
+            owner_id=owner_id,
+            agent_id=config.agent_id,
+            override_count=len(config.tool_overrides),
+        )
+        return updated
+
+    def _validate_config(self, config: ThreadConfigView) -> None:
+        # No agent_id → use account default; nothing to validate yet.
+        agent = (
+            self._registry.get(config.agent_id) if config.agent_id else None
+        )
+        if config.agent_id and agent is None:
+            raise InvalidThreadConfigError(
+                f"unknown agent_id {config.agent_id!r}"
+            )
+        # If no overrides, we're done.
+        if not config.tool_overrides:
+            return
+        # Overrides are only meaningful in the context of a known agent.
+        # When the thread has no explicit agent_id, validate against
+        # the default agent — that's the one the resolver will pick.
+        if agent is None:
+            default = self._registry.get(self._registry.default_id())
+            if default is None:
+                # Defensive: registry boot validation should make this
+                # impossible.
+                raise InvalidThreadConfigError(
+                    "registry has no default agent to validate overrides against"
+                )
+            agent = default
+        tools_by_id = {t.id: t for t in agent.spec.tools}
+        for tool_id in config.tool_overrides:
+            tool = tools_by_id.get(tool_id)
+            if tool is None:
+                raise InvalidThreadConfigError(
+                    f"agent {agent.spec.id!r} has no tool {tool_id!r}"
+                )
+            if not tool.user_toggleable:
+                raise InvalidThreadConfigError(
+                    f"tool {tool_id!r} on agent {agent.spec.id!r} is not "
+                    f"user-toggleable; remove the override"
+                )
 
     async def load_messages(
         self, *, thread_id: str, owner_id: str

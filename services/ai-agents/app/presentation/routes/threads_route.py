@@ -54,6 +54,13 @@ class ThreadsRoute(BaseRoute):
             tags=["threads"],
         )
         self.router.add_api_route(
+            "/{thread_id}/config",
+            self._controller.update_thread_config,
+            methods=["PATCH"],
+            response_model=ThreadResponse,
+            tags=["threads"],
+        )
+        self.router.add_api_route(
             "/{thread_id}/messages",
             self._controller.thread_history,
             methods=["GET"],

@@ -39,12 +39,19 @@ from ...infrastructure.agentic.agentic_store import AgenticStore
 from ...infrastructure.ai.title_generator import TitleGenerator
 from ...infrastructure.cache.event_stream import EventStream
 from ...infrastructure.config.env import load_env
+from ...infrastructure.files.file_storage import (
+    IFileStorage,
+    InMemoryFileStorage,
+    LocalFileStorage,
+    S3FileStorage,
+)
 from ...infrastructure.llm.litellm_client import LiteLLMClient
 from ...infrastructure.logging.structlog_logger import StructlogLogger
 from ...infrastructure.messaging.kafka_event_consumer import KafkaEventConsumer
 from ...infrastructure.messaging.kafka_event_publisher import KafkaEventPublisher
 from ..controllers.agents_runs_controller import AgentsRunsController
 from ..controllers.capabilities_controller import CapabilitiesController
+from ..controllers.files_controller import FilesController
 from ..controllers.health_controller import HealthController
 from ..controllers.threads_controller import ThreadsController
 from ..controllers.turns_controller import TurnsController
@@ -56,6 +63,7 @@ from ..controllers.turns_controller import TurnsController
 from ..routes.agents_runs_route import AgentsRunsRoute
 from ..routes.agents_ws_route import AgentsWsRoute
 from ..routes.capabilities_route import CapabilitiesRoute
+from ..routes.files_route import FilesRoute
 from ..routes.notifications_ws_route import NotificationsWsRoute
 from ..routes.threads_route import ThreadsRoute
 from ..routes.turns_route import TurnsRoute
@@ -64,6 +72,7 @@ _AUTO_MOUNT_ROUTES: tuple[type, ...] = (
     AgentsRunsRoute,
     AgentsWsRoute,
     CapabilitiesRoute,
+    FilesRoute,
     NotificationsWsRoute,
     ThreadsRoute,
     TurnsRoute,
@@ -217,6 +226,23 @@ def register_dependencies() -> Container:
     registry.discover()
     container.register("AgentRegistry", registry)
 
+    # File storage backend — picked by env var. Local is the default
+    # and matches our single-pod compose layout; S3 is interface-only
+    # today (its constructor raises with instructions). InMemory exists
+    # for tests / dev smoke runs.
+    storage: IFileStorage
+    backend = env.files_storage_backend.lower()
+    if backend == "memory":
+        storage = InMemoryFileStorage()
+    elif backend == "s3":
+        # Constructor raises NotImplementedError with a clear message.
+        # We instantiate at boot so a misconfig fails loudly here,
+        # not on the first upload.
+        storage = S3FileStorage(bucket="praxis-files")
+    else:
+        storage = LocalFileStorage(env.files_local_dir, logger)
+    container.register("IFileStorage", storage)
+
     # AgentRunner: streams events from the LangGraph graph through an opaque
     # `on_event` callback. The RunManager wires that callback to the
     # EventStream so a WebSocket disconnect doesn't kill the run.
@@ -301,6 +327,10 @@ def register_dependencies() -> Container:
     container.register(
         "CapabilitiesController",
         CapabilitiesController(container.resolve("ICapabilitiesService")),
+    )
+    container.register(
+        "FilesController",
+        FilesController(container.resolve("IFilesService")),
     )
 
     return container

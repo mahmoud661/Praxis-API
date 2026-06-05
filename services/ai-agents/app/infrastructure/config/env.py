@@ -36,6 +36,16 @@ class Env(BaseSettings):
     # How many times the Kafka consumer retries a handler before DLQ.
     kafka_max_handler_attempts: int = 3
 
+    # File storage backend. `local` (default) writes to `files_local_dir`;
+    # `memory` is dict-backed (tests only); `s3` is interface-only today
+    # (see `infrastructure/files/file_storage.py` — raises at construction
+    # so a misconfig fails loud at boot).
+    files_storage_backend: str = "local"
+    # Where LocalFileStorage writes. Volume-mounted in production so
+    # files survive pod restarts; defaults to a path inside the
+    # container that compose can mount.
+    files_local_dir: str = "/var/lib/praxis/files"
+
     @property
     def kafka_broker_list(self) -> list[str]:
         return [b.strip() for b in self.kafka_brokers.split(",") if b.strip()]

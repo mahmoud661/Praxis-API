@@ -16,12 +16,35 @@ class CreateThreadInput:
 
 
 @dataclass(frozen=True, slots=True)
+class ThreadConfigView:
+    """Per-thread overrides on top of the agent's default capability state.
+
+    `agent_id` (`None` → use the account default agent), `tool_overrides`
+    (`{tool_id: enabled_bool}` — sparse, only entries for tools the user
+    actually flipped), `custom_system_prompt_id` (future use).
+
+    Stored as a JSON sub-object inside the LangGraph k/v store value
+    alongside owner_id + title + timestamps. Threads created BEFORE
+    config rolled out have this set to `EMPTY_CONFIG` on read.
+    """
+
+    agent_id: str | None = None
+    tool_overrides: dict[str, bool] = field(default_factory=dict)
+    custom_system_prompt_id: str | None = None
+
+
+# A reusable "no overrides" sentinel for older threads.
+EMPTY_CONFIG = ThreadConfigView()
+
+
+@dataclass(frozen=True, slots=True)
 class ThreadView:
     id: str
     owner_id: str
     title: str
     created_at: str  # ISO-8601
     updated_at: str  # ISO-8601
+    config: ThreadConfigView = field(default_factory=ThreadConfigView)
 
 
 @dataclass(frozen=True, slots=True)

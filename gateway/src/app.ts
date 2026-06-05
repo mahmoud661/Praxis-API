@@ -168,6 +168,24 @@ export function buildApp(deps: {
     }),
   );
 
+  // /v1/files — multipart upload for chat attachments. Same upstream.
+  // Idempotency LAYERED IN: a flaky network can retry a multipart
+  // upload and we'd otherwise create duplicate file rows. Per-identity
+  // rate limit keeps a single user from saturating storage.
+  app.use(
+    "/v1/files",
+    attachSession,
+    requireSession,
+    perIdentityLimit,
+    idempotency,
+    makeCircuitBreakerMiddleware(agentsBreaker),
+    makeServiceProxy({
+      target: config.AI_AGENTS_SERVICE_URL,
+      requireAuth: true,
+      pathRewrite: reprefix("/files"),
+    }),
+  );
+
   // -----------------------------------------------------------------
   // Legacy paths (no version prefix) — kept as alias for backward compat,
   // marked Deprecated. Remove once all clients move to /v1.
