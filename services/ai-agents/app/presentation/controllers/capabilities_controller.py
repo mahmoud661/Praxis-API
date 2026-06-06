@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field
 
 from ...domain.dtos.capability_dto import (
     AcceptsView,
-    AccountView,
     AgentView,
     CapabilitiesView,
     LimitsView,
@@ -126,27 +125,10 @@ class AgentResponse(BaseModel):
         )
 
 
-class AccountResponse(BaseModel):
-    tier: str
-    monthly_message_quota: int
-    messages_remaining: int
-    feature_flags: list[str] = Field(default_factory=list)
-
-    @classmethod
-    def from_view(cls, a: AccountView) -> "AccountResponse":
-        return cls(
-            tier=a.tier,
-            monthly_message_quota=a.monthly_message_quota,
-            messages_remaining=a.messages_remaining,
-            feature_flags=list(a.feature_flags),
-        )
-
-
 class CapabilitiesResponse(BaseModel):
     schema_version: str
     agents: list[AgentResponse]
     default_agent_id: str
-    account: AccountResponse
 
     @classmethod
     def from_view(cls, v: CapabilitiesView) -> "CapabilitiesResponse":
@@ -154,7 +136,6 @@ class CapabilitiesResponse(BaseModel):
             schema_version=v.schema_version,
             agents=[AgentResponse.from_view(a) for a in v.agents],
             default_agent_id=v.default_agent_id,
-            account=AccountResponse.from_view(v.account),
         )
 
 

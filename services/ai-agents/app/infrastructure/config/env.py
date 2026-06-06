@@ -41,10 +41,13 @@ class Env(BaseSettings):
     # (see `infrastructure/files/file_storage.py` — raises at construction
     # so a misconfig fails loud at boot).
     files_storage_backend: str = "local"
-    # Where LocalFileStorage writes. Volume-mounted in production so
-    # files survive pod restarts; defaults to a path inside the
-    # container that compose can mount.
-    files_local_dir: str = "/var/lib/praxis/files"
+    # Where LocalFileStorage writes. Default is `/tmp/praxis-files` so
+    # the service boots in any container without volume / permission
+    # gymnastics — `/tmp` is universally writable. Files DO NOT survive
+    # restarts at this path. For production, override via env to a
+    # path you've volume-mounted (e.g. `/var/lib/praxis/files`) so
+    # uploads persist across pod restarts.
+    files_local_dir: str = "/tmp/praxis-files"
 
     @property
     def kafka_broker_list(self) -> list[str]:

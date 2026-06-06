@@ -10,7 +10,7 @@ Shape mirrors the contract in the spec issue — see Praxis-API#25.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Re-export the literal types from the spec so callers can import a
 # single module for the whole capability surface without reaching back
@@ -80,20 +80,9 @@ class AgentView:
 
 
 @dataclass(frozen=True, slots=True)
-class AccountView:
-    """Account-level state that applies across every agent."""
-
-    tier: str
-    monthly_message_quota: int
-    messages_remaining: int
-    feature_flags: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True, slots=True)
 class CapabilitiesView:
     """Full payload for `GET /v1/capabilities`."""
 
     schema_version: str
     agents: list[AgentView]
     default_agent_id: str
-    account: AccountView

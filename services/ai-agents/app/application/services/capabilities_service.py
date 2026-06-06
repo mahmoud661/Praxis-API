@@ -1,13 +1,11 @@
 """
 CapabilitiesService — assembles the response for `GET /v1/capabilities`.
 
-Composes three sources:
+Composes two sources:
 
   1. AgentRegistry — the canonical agent catalog (each agent's `spec`).
   2. LiteLLMClient — per-model metadata (vendor, context_window,
      per-token cost) for the `underlying` block.
-  3. (TODO) AccountService / billing — tier + quota. Stubbed in v1 with
-     conservative defaults so the wire shape is complete.
 
 Auto-registered by the container as `"ICapabilitiesService"` (the
 "I" + ClassName convention; see `container.py`).
@@ -17,7 +15,6 @@ from __future__ import annotations
 
 from ...domain.dtos.capability_dto import (
     AcceptsView,
-    AccountView,
     AgentPricing,
     AgentView,
     CapabilitiesView,
@@ -89,9 +86,8 @@ class CapabilitiesService:
         self._logger = logger
 
     async def list_capabilities(self, *, user_id: str) -> CapabilitiesView:
-        # `user_id` isn't read yet — v1 doesn't do per-user filtering.
-        # Keeping it in the signature so callers wire the auth header
-        # through now, no later breaking change when tier gating lands.
+        # `user_id` reserved for future per-user filtering (tier-based
+        # model allowlists via LiteLLM virtual keys). Not read today.
         del user_id
 
         models = await self._litellm.list_models()
@@ -104,21 +100,7 @@ class CapabilitiesService:
             schema_version=_SCHEMA_VERSION,
             agents=agents,
             default_agent_id=self._registry.default_id(),
-            account=_default_account(),
         )
-
-
-def _default_account() -> AccountView:
-    """Stub account block. Real billing/quota is out-of-scope for v1
-    (see Praxis-API#25). Wire shape is honest about the shape; the
-    numbers are placeholders the frontend should NOT treat as
-    authoritative for billing decisions."""
-    return AccountView(
-        tier="free",
-        monthly_message_quota=0,
-        messages_remaining=0,
-        feature_flags=[],
-    )
 
 
 def _spec_to_view(spec: AgentSpec, model: ModelInfo | None) -> AgentView:

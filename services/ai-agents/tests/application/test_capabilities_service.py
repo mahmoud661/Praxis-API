@@ -1,9 +1,8 @@
 """Unit tests for `CapabilitiesService`.
 
 Exercises the composition logic — derived MIME types, attachment caps,
-underlying-model augmentation, default account block. Doesn't hit any
-network or DB: the registry runs on fixture agents and the LiteLLM
-client is mocked."""
+underlying-model augmentation. Doesn't hit any network or DB: the
+registry runs on fixture agents and the LiteLLM client is mocked."""
 
 from pathlib import Path
 
@@ -144,15 +143,6 @@ async def test_unknown_underlying_model_returns_minimal_block():
     assert alpha.underlying.vendor == "unknown"
     assert alpha.underlying.context_window == 0
     assert alpha.underlying.pricing is None
-
-
-@pytest.mark.asyncio
-async def test_default_account_block_is_present():
-    svc, _ = _service()
-    view = await svc.list_capabilities(user_id="u1")
-    assert view.account.tier == "free"
-    assert view.account.monthly_message_quota == 0
-    assert view.account.feature_flags == []
 
 
 @pytest.mark.asyncio
