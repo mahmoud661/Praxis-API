@@ -150,6 +150,13 @@ class TurnsService:
         if not content:
             raise InvalidTurnTargetError(f"{action} content resolved to empty")
 
+        # Preserve the turn's attachments. The original HumanMessage
+        # carries a metadata snapshot under `additional_kwargs.attachments`
+        # (written by AgentRunner); re-running without the file ids would
+        # silently drop the files from the regenerated turn — the preload
+        # middleware only primes the model with files listed in config.
+        attachment_ids = _attachment_ids(target)
+
         # Delete the target user message and everything that followed.
         # The reducer on the messages channel handles RemoveMessage as
         # "drop the entry whose id matches mine".
@@ -173,10 +180,29 @@ class TurnsService:
         # event stream, and the per-thread asyncio task — same as a
         # normal "user typed and submitted" flow.
         await self._run_manager.start_run(
-            thread_id=thread_id, owner_id=owner_id, content=content
+            thread_id=thread_id,
+            owner_id=owner_id,
+            content=content,
+            attachments=attachment_ids,
         )
 
     async def _ensure_ownership(self, thread_id: str, owner_id: str) -> None:
         thread = await self._repo.get(thread_id)
         if thread is None or thread.owner_id != owner_id:
             raise ThreadNotFoundError(thread_id)
+
+
+def _attachment_ids(message: Any) -> list[str]:
+    """File ids from the message's persisted attachment snapshot.
+    Missing / malformed snapshot → empty list (text-only turn)."""
+    extras = getattr(message, "additional_kwargs", None) or {}
+    raw = extras.get("attachments") if isinstance(extras, dict) else None
+    if not isinstance(raw, list):
+        return []
+    ids: list[str] = []
+    for item in raw:
+        if isinstance(item, dict):
+            file_id = item.get("id")
+            if isinstance(file_id, str) and file_id:
+                ids.append(file_id)
+    return ids
