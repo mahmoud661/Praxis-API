@@ -237,7 +237,9 @@ class TestReadAttachment:
         assert "scan.pdf" in out
 
     @pytest.mark.asyncio
-    async def test_unsupported_mime_returns_tool_error(self) -> None:
+    async def test_unsupported_mime_returns_graceful_note(self) -> None:
+        # Unknown binary types (audio, video, archives…) must not break
+        # the turn — the model gets a descriptive note, not an error.
         files = _FakeFilesService()
         files.seed(
             owner_id="user-A",
@@ -250,7 +252,9 @@ class TestReadAttachment:
             files=files, extractor=DocumentExtractor(), lookup=_LOOKUP
         )
         out = await tool.ainvoke({"file_id": "weird"}, config=_config())
-        assert "[tool error]" in out
+        assert "[tool error]" not in out
+        assert "x.bin" in out
+        assert "can't be read as text" in out
 
 
 # ----- kb_search --------------------------------------------------------------

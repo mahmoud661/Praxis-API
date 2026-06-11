@@ -370,6 +370,12 @@ def _next_alias(
     if mime_type == "application/pdf":
         counters["pdf"] = counters.get("pdf", 0) + 1
         return f"turn{turn_index}pdf{counters['pdf']}"
+    if mime_type.startswith("audio/"):
+        counters["audio"] = counters.get("audio", 0) + 1
+        return f"turn{turn_index}audio{counters['audio']}"
+    if mime_type.startswith("video/"):
+        counters["video"] = counters.get("video", 0) + 1
+        return f"turn{turn_index}video{counters['video']}"
     return f"turn{turn_index}file{counters['file']}"
 
 

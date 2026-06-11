@@ -426,6 +426,15 @@ def _to_history_view(
             tc_id = str(getattr(tc, "id", "") or "")
             tc_name = str(getattr(tc, "name", "") or "")
             tc_args_raw = getattr(tc, "args", None)
+        # Synthetic preload calls (AttachmentPreloadMiddleware fabricates
+        # them with a `preload-` id prefix) are model-facing plumbing —
+        # the user already sees the attachment as a chip on their own
+        # message, so a "read_attachment" tool card for it is noise.
+        # Filtering here also drops the carrier AIMessage entirely: its
+        # content is empty, so with zero visible tool calls it fails the
+        # keep-check in `_pair_messages_for_view`.
+        if tc_id.startswith("preload-"):
+            continue
         tc_args = tc_args_raw if isinstance(tc_args_raw, dict) else {}
         tool_calls.append(
             HistoryToolCallView(

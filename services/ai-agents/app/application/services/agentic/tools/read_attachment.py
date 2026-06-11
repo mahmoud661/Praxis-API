@@ -214,10 +214,16 @@ async def materialize_attachment(
     try:
         text = extractor.extract_text(data=data, mime_type=file.mime_type)
     except UnsupportedMimeTypeError:
+        # Not an error — audio, video, archives, binaries… anything the
+        # extractor can't turn into text. The turn must not break and
+        # the model should still know the file EXISTS (name, type,
+        # size) so it can talk about it, even though it can't read the
+        # bytes. The user can preview/download via the attachment chip.
         return (
-            f"[tool error] don't know how to read MIME "
-            f"{file.mime_type!r}. Supported: text/*, application/pdf, "
-            "image/*."
+            f"[Attachment '{file.filename}' ({file.mime_type}, "
+            f"{_format_bytes(file.size_bytes)}) — this file type can't "
+            "be read as text by the agent. The file is stored and the "
+            "user can preview or download it from their message.]"
         )
     text = text.strip()
     if not text:
@@ -275,6 +281,14 @@ def _paginate_text(
 
 
 # ---- module helpers ----------------------------------------------------------
+
+
+def _format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / 1024 / 1024:.1f} MB"
 
 
 def _owner_id_from_config(config: RunnableConfig | None) -> str | None:

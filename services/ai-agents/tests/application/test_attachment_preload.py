@@ -222,7 +222,10 @@ class TestMaterializeAttachment:
         assert "beyond the end" in out
 
     @pytest.mark.asyncio
-    async def test_unsupported_mime_returns_tool_error(self) -> None:
+    async def test_unsupported_mime_returns_graceful_note(self) -> None:
+        # Audio/video/binary uploads must NOT break the turn — the
+        # model gets a descriptive note (name, type, size) instead of
+        # an error, and the file stays available via the user's chip.
         files = _FakeFilesService()
         files.seed(
             owner_id="u1",
@@ -237,4 +240,7 @@ class TestMaterializeAttachment:
             file_id="weird",
             owner_id="u1",
         )
-        assert "[tool error]" in out
+        assert "[tool error]" not in out
+        assert "x.bin" in out
+        assert "application/x-thing" in out
+        assert "can't be read as text" in out

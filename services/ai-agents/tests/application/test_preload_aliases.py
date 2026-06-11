@@ -55,6 +55,25 @@ class TestNextAlias:
             == "turn5file1"
         )
 
+    def test_audio_and_video_get_their_own_categories(self) -> None:
+        counters: dict[str, int] = {}
+        assert (
+            _next_alias(mime_type="audio/mpeg", counters=counters, turn_index=0)
+            == "turn0audio1"
+        )
+        assert (
+            _next_alias(mime_type="video/mp4", counters=counters, turn_index=0)
+            == "turn0video1"
+        )
+        # The permissive `file` bucket counted both, so a binary that
+        # follows is file3.
+        assert (
+            _next_alias(
+                mime_type="application/zip", counters=counters, turn_index=0
+            )
+            == "turn0file3"
+        )
+
 
 class TestAliasHeader:
     def test_prefixes_text_with_alias(self) -> None:
