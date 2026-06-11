@@ -29,3 +29,9 @@ class FileView:
     mime_type: str
     size_bytes: int
     created_at: str  # ISO-8601
+    # Short LLM-generated description ("login form screenshot showing
+    # two fields"), cached lazily by `AttachmentCompactionMiddleware`
+    # on first eviction. Used to make eviction stubs self-describing:
+    # `[Attachment cleared — was: <caption>. Re-fetch via read_attachment(id).]`
+    # `None` until generated.
+    caption: str | None = None

@@ -60,6 +60,20 @@ class HistoryToolCallView:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryAttachmentView:
+    """Snapshot of one file attached to a user message — persisted in
+    the message's `additional_kwargs.attachments` at send time so the
+    frontend can render chips/thumbnails on history reload without an
+    extra round-trip, AND so the chip still renders even if the file
+    is later deleted."""
+
+    id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class HistoryMessageView:
     # The LangChain BaseMessage UUID — stable across re-renders and what
     # the retry/edit endpoints use to identify the message to rewind to.
@@ -71,6 +85,16 @@ class HistoryMessageView:
     # the frontend gets a complete picture instead of two messages it has
     # to stitch together.
     tool_calls: list[HistoryToolCallView] = field(default_factory=list)
+    # Attachments the user sent with THIS message (user role only).
+    # Snapshot from `HumanMessage.additional_kwargs.attachments`.
+    # Empty for non-user roles or text-only user messages.
+    attachments: list[HistoryAttachmentView] = field(default_factory=list)
+    # Resolved content references the assistant emitted in this message
+    # (assistant role only). The compaction middleware doesn't touch
+    # these — they're raw dicts straight from
+    # `additional_kwargs.content_references`. The frontend uses
+    # `start_idx` / `end_idx` to swap text spans for components.
+    content_references: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

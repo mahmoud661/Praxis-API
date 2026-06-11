@@ -39,13 +39,17 @@ from ...infrastructure.agentic.agentic_store import AgenticStore
 from ...infrastructure.ai.title_generator import TitleGenerator
 from ...infrastructure.cache.event_stream import EventStream
 from ...infrastructure.config.env import load_env
+from ...infrastructure.documents.document_extractor import DocumentExtractor
 from ...infrastructure.files.file_storage import (
     IFileStorage,
     InMemoryFileStorage,
     LocalFileStorage,
     S3FileStorage,
 )
+from ...infrastructure.llm.embedding_client import EmbeddingClient
 from ...infrastructure.llm.litellm_client import LiteLLMClient
+from ...infrastructure.vector.in_memory_vector_store import InMemoryVectorStore
+from ...infrastructure.vector.qdrant_vector_store import QdrantVectorStore
 from ...infrastructure.logging.structlog_logger import StructlogLogger
 from ...infrastructure.messaging.kafka_event_consumer import KafkaEventConsumer
 from ...infrastructure.messaging.kafka_event_publisher import KafkaEventPublisher
@@ -122,6 +126,12 @@ class Container:
                 if name.startswith("_"):
                     continue
                 token = token_fn(obj)
+                # Skip if a binding for this token is already in place —
+                # lets the composition root pre-register a service
+                # manually (in dep-order) to break cycles the
+                # alphabetical glob can't handle on its own.
+                if self.has(token):
+                    continue
                 self.register(token, self.construct(obj))
 
     def construct(self, cls: type) -> Any:
@@ -192,11 +202,6 @@ def register_dependencies() -> Container:
         token_fn=lambda cls: "I" + cls.__name__.replace("Repo", "") + "Repo",
     )
 
-    # MainAgent compiles its graph lazily on first use, so it can be built
-    # here before AgenticStore.init() has connected — get() defers _build()
-    # until after the lifespan has wired the checkpointer.
-    container.register("MainAgent", MainAgent(container.resolve("AgenticStore"), env))
-
     # LiteLLM admin client — used by the agent registry's boot-time
     # validation AND the capabilities service for per-agent
     # `underlying` metadata. Single instance, cached internally.
@@ -209,13 +214,11 @@ def register_dependencies() -> Container:
         ),
     )
 
-    # Agent registry — discovers BaseAgent subclasses in
-    # `application/services/agentic/agents/`. `construct` is the
-    # callable; we hand the container's own `construct` so each agent's
-    # `__init__` annotations get resolved (AgenticStore, Env, etc.).
-    # `.discover()` runs synchronously here so the catalog is populated
-    # before the capabilities service is constructed below.
-    # `.validate_against(litellm)` is async, deferred to the lifespan.
+    # Agent registry built here BUT discovery deferred to after the
+    # services auto-register below — agents depend on IFilesService /
+    # IKnowledgeService which don't exist until then. The registry
+    # itself goes into the container right away because downstream
+    # services (CapabilitiesService) take it as an __init__ dep.
     registry = AgentRegistry(
         agents_folder=(
             _APP_ROOT / "application" / "services" / "agentic" / "agents"
@@ -223,8 +226,15 @@ def register_dependencies() -> Container:
         logger=logger,
         constructor=container.construct,
     )
-    registry.discover()
     container.register("AgentRegistry", registry)
+
+    # MainAgent is now a thin proxy over the registry's default agent —
+    # all real graph wiring lives in BaseAgent subclasses. Registered
+    # AFTER the registry so its constructor can take the registry as a
+    # dependency. Graph compilation stays lazy: the proxy's `get()`
+    # resolves the default agent at call time, by which point
+    # `discover()` has run.
+    container.register("MainAgent", MainAgent(registry))
 
     # File storage backend — picked by env var. Local is the default
     # and matches our single-pod compose layout; S3 is interface-only
@@ -243,12 +253,56 @@ def register_dependencies() -> Container:
         storage = LocalFileStorage(env.files_local_dir, logger)
     container.register("IFileStorage", storage)
 
+    # Document extractor — stateless, no DI deps. One instance shared
+    # across all callers (the read_attachment tool, KnowledgeService).
+    container.register("IDocumentExtractor", DocumentExtractor())
+
+    # Embedding client — talks to the LiteLLM proxy's /embeddings
+    # endpoint. Same auth/base-url as the chat client. Holds an
+    # httpx.AsyncClient with keep-alive; closed via lifespan shutdown.
+    container.register("IEmbeddingClient", EmbeddingClient(env, logger))
+
+    # Vector store — Qdrant by default; InMemory for dev/test setups
+    # without Qdrant running. The collection is created on first
+    # `ensure_ready()` call from the lifespan startup hook.
+    if env.vector_store_backend.lower() == "memory":
+        container.register("IVectorStore", InMemoryVectorStore())
+    else:
+        container.register("IVectorStore", QdrantVectorStore(env, logger))
+
+    # Pre-register KnowledgeService + FilesService manually so the
+    # AgentRunner construction below can resolve IFilesService. The
+    # alphabetical auto_register globber would build FilesService BEFORE
+    # KnowledgeService (FilesService depends on IKnowledgeService) and
+    # fail. Pre-registering both here in dep-order breaks the cycle;
+    # the later auto_register skips them via the has-token short-circuit.
+    from ...application.services.content_reference_lookup_service import (
+        ContentReferenceLookupService,
+    )
+    from ...application.services.files_service import FilesService
+    from ...application.services.knowledge_service import KnowledgeService
+
+    container.register("IKnowledgeService", container.construct(KnowledgeService))
+    container.register("IFilesService", container.construct(FilesService))
+    # Pre-register under the port's name `IContentReferenceLookup` so
+    # `ContentReferenceMiddleware` resolves it. Class name doesn't
+    # match the `I + cls.__name__` convention (port is shorter than
+    # impl class name), so we do this by hand.
+    container.register(
+        "IContentReferenceLookup",
+        container.construct(ContentReferenceLookupService),
+    )
+
     # AgentRunner: streams events from the LangGraph graph through an opaque
     # `on_event` callback. The RunManager wires that callback to the
     # EventStream so a WebSocket disconnect doesn't kill the run.
     container.register(
         "AgentRunner",
-        AgentRunner(container.resolve("MainAgent"), logger),
+        AgentRunner(
+            container.resolve("MainAgent"),
+            container.resolve("IFilesService"),
+            logger,
+        ),
     )
 
     # RunManager: owns the background asyncio.Task per thread, the running
@@ -292,6 +346,12 @@ def register_dependencies() -> Container:
         folder=_APP_ROOT / "application" / "services",
         token_fn=lambda cls: "I" + cls.__name__,
     )
+
+    # Agents discover NOW — after services auto-register so an agent's
+    # __init__ can resolve IFilesService, IKnowledgeService, etc.
+    # `.validate_against(litellm)` is async and stays deferred to the
+    # lifespan; this call is the synchronous instantiation pass.
+    registry.discover()
 
     # Wire post-turn hooks now that BOTH RunManager and ThreadsService
     # have been constructed. ThreadsService.maybe_generate_title runs

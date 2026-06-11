@@ -31,3 +31,10 @@ class IFilesService(Protocol):
     async def delete(self, *, file_id: str, owner_id: str) -> None:
         """Drop the metadata + storage entry. Same ownership semantics
         as `get`. Idempotent on the storage side."""
+
+    async def set_caption(
+        self, *, file_id: str, owner_id: str, caption: str
+    ) -> None:
+        """Stash a short LLM-generated description on the file's
+        metadata. Used by the compaction middleware to enrich
+        eviction stubs on second+ evictions of the same file."""

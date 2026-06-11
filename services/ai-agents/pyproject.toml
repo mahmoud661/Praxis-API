@@ -27,6 +27,15 @@ dependencies = [
   "opentelemetry-instrumentation-fastapi==0.46b0",
   "opentelemetry-instrumentation-psycopg==0.46b0",
   "opentelemetry-instrumentation-logging==0.46b0",
+  # PDF text extraction (pure-Python — no binary deps, ships in the wheel).
+  # `pypdf` is the maintained successor to `PyPDF2`. We only need text
+  # extraction, not rendering, so the small surface fits.
+  "pypdf>=4.0.0",
+  # Vector store — pinned to the v1 client, sync HTTP under the hood.
+  # `qdrant-client[fastembed]` would also bundle a local embedding
+  # backend, but we route embeddings through the LiteLLM proxy so we
+  # don't need fastembed in this service.
+  "qdrant-client>=1.10.0",
 ]
 
 [project.optional-dependencies]

@@ -23,6 +23,7 @@ from uuid import uuid4
 from redis.asyncio import Redis
 
 from ...domain.dtos.thread_dto import (
+    HistoryAttachmentView,
     HistoryMessageView,
     HistoryPageView,
     HistoryToolCallView,
@@ -392,7 +393,15 @@ def _pair_messages_for_view(
         if msg_type == "tool":
             continue  # surfaced via the parent AIMessage's tool_calls
         view = _to_history_view(msg, tool_results)
-        if view.content.strip() or view.tool_calls:
+        # Keep the message if it has ANYTHING the UI can render:
+        # visible text, tool calls (assistant turns), OR attachments
+        # (user turns that uploaded a file with no caption text). The
+        # attachments check is critical — user-attached images have
+        # their content rewritten to a list of `image_url` blocks by
+        # the preload middleware, which the flattener drops, leaving
+        # `content` empty. Without this check, the user's "look at
+        # this image" bubble would disappear from history.
+        if view.content.strip() or view.tool_calls or view.attachments:
             out.append(view)
     return out
 
@@ -427,24 +436,86 @@ def _to_history_view(
             )
         )
 
+    attachments = _attachments_from_msg(msg)
+    content_refs = _content_references_from_msg(msg)
     return HistoryMessageView(
         id=msg_id,
         role=role,
         content=content,
         tool_calls=tool_calls,
+        attachments=attachments,
+        content_references=content_refs,
     )
+
+
+def _content_references_from_msg(msg: object) -> list[dict]:
+    """Pull resolved content references off an assistant message. The
+    backend's `ContentReferenceMiddleware` stamps these onto
+    `additional_kwargs.content_references` after each model emission.
+    History reload just passes them straight through."""
+    extras = getattr(msg, "additional_kwargs", None) or {}
+    raw = extras.get("content_references") if isinstance(extras, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _attachments_from_msg(msg: object) -> list[HistoryAttachmentView]:
+    """Pull attachment snapshots out of `HumanMessage.additional_kwargs`.
+    Returns `[]` for non-user messages and messages without attachments.
+    Defensive: malformed entries (missing fields, wrong types) are
+    silently dropped rather than crashing the history render."""
+    extras = getattr(msg, "additional_kwargs", None) or {}
+    raw = extras.get("attachments") if isinstance(extras, dict) else None
+    if not isinstance(raw, list):
+        return []
+    out: list[HistoryAttachmentView] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(
+                HistoryAttachmentView(
+                    id=str(item["id"]),
+                    filename=str(item.get("filename", "")),
+                    mime_type=str(item.get("mime_type", "application/octet-stream")),
+                    size_bytes=int(item.get("size_bytes", 0) or 0),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
 
 
 def _flatten_content(content: object) -> str:
     """LangChain sometimes packs content as a list of content-blocks.
-    Flatten naively to a string the frontend can render."""
+    Flatten naively to a string the frontend can render.
+
+    Non-text blocks (e.g. `{type: "image_url", image_url: {...}}` from
+    the synthetic read_attachment preload) have no `text` field — they
+    drop out of the flattened string rather than serializing as
+    `"None"` or raising. The frontend renders attachments via
+    `additional_kwargs.attachments` anyway, so dropping image blocks
+    here doesn't lose information.
+
+    Plumbing-text guard: an early preload version appended an
+    `[Attached image aliases: …]` text block to the HumanMessage, and
+    threads persisted before the fix still carry it. Skip it on the
+    way out so those bubbles render only what the user actually typed."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(
-            (block.get("text") if isinstance(block, dict) else str(block))
-            for block in content
-        )
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str) and not text.startswith(
+                    "[Attached image aliases:"
+                ):
+                    parts.append(text)
+        return "".join(parts)
     return str(content) if content is not None else ""
 
 

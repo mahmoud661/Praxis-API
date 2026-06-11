@@ -29,6 +29,7 @@ import asyncio
 from fastapi import WebSocket, WebSocketDisconnect
 
 from ...application.services.agentic.run_manager import RunManager
+from ...domain.ports.logger import Logger
 from ...infrastructure.cache.event_stream import EventStream
 from ..http.dependencies import ws_authenticate
 from .base_route import BaseRoute
@@ -47,10 +48,12 @@ class AgentsWsRoute(BaseRoute):
         self,
         run_manager: RunManager,
         event_stream: EventStream,
+        logger: Logger,
     ) -> None:
         # Container resolves these by their annotation class names.
         self._runs = run_manager
         self._stream = event_stream
+        self._logger = logger
         super().__init__()
 
     def _init_routes(self) -> None:
@@ -87,6 +90,26 @@ class AgentsWsRoute(BaseRoute):
                         }
                     )
                     continue
+                # Optional list of file ids the user attached for this
+                # turn. The frontend uploaded them via POST /v1/files
+                # beforehand and ships the ids here so the agent runtime
+                # can materialize them into context via the synthetic
+                # read_attachment pre-load (AttachmentPreloadMiddleware).
+                # Filter aggressively — anything that isn't a non-empty
+                # string is dropped before reaching the agent.
+                attachments_raw = msg.get("attachments") or []
+                attachments = [
+                    a for a in attachments_raw if isinstance(a, str) and a
+                ] if isinstance(attachments_raw, list) else []
+                # TEMP DEBUG — drop after attachment flow is confirmed.
+                self._logger.info(
+                    "ws.message.received",
+                    thread_id=thread_id,
+                    content_chars=len(content),
+                    attachments_raw=attachments_raw,
+                    attachments_parsed=attachments,
+                    msg_keys=list(msg.keys()),
+                )
                 # Always accepted — if a run is in flight the manager
                 # appends to its FIFO queue and emits `queue.changed` over
                 # the stream so the UI can render the pending turn.
@@ -94,6 +117,7 @@ class AgentsWsRoute(BaseRoute):
                     thread_id=thread_id,
                     owner_id=user_id,
                     content=content,
+                    attachments=attachments,
                 )
 
         async def writer() -> None:

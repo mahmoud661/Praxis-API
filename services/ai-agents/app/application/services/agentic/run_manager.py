@@ -63,6 +63,12 @@ class _QueuedTurn:
     id: str
     content: str
     enqueued_at: str
+    # File ids the user attached for this turn. Threaded into the
+    # LangGraph config so AttachmentPreloadMiddleware can synthesize a
+    # fake `read_attachment` tool call per id, putting the file in
+    # context before the model sees the user's text. Empty list when
+    # the user sent text only.
+    attachments: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -110,11 +116,21 @@ class RunManager:
     # ----- public API ------------------------------------------------------
 
     async def start_run(
-        self, *, thread_id: str, owner_id: str, content: str
+        self,
+        *,
+        thread_id: str,
+        owner_id: str,
+        content: str,
+        attachments: list[str] | None = None,
     ) -> bool:
         """Submit a user turn. Always accepted — if a run is in flight on
         this thread, the turn is queued and will fire when the current one
         finishes. Returns True for "started immediately", False for "queued".
+
+        `attachments` is the list of file ids the user attached for THIS
+        turn (already uploaded via the files endpoint). They get
+        carried to the AgentRunner and into the LangGraph config so
+        the preload middleware can prime the model's context.
 
         Note: the boolean used to mean "rejected" — it now means "queued".
         Callers don't error on False; the WS handler treats both as success.
@@ -134,6 +150,7 @@ class RunManager:
             id=self._mint_turn_id(),
             content=content,
             enqueued_at=_now_iso(),
+            attachments=list(attachments or []),
         )
 
         if handle is not None:
@@ -261,7 +278,9 @@ class RunManager:
         try:
             await self._runner.run(
                 thread_id=handle.thread_id,
+                owner_id=handle.owner_id,
                 user_message=turn.content,
+                attachments=turn.attachments,
                 on_event=on_event,
             )
         except asyncio.CancelledError:

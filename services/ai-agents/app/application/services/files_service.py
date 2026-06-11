@@ -26,11 +26,13 @@ class name = token).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from ...domain.dtos.file_dto import FileView
+from ...domain.IServices.i_knowledge_service import IKnowledgeService
 from ...domain.ports.logger import Logger
 from ...infrastructure.agentic.agentic_store import AgenticStore
 from ...infrastructure.files.file_storage import (
@@ -91,10 +93,12 @@ class FilesService:
         self,
         file_storage: IFileStorage,
         agentic_store: AgenticStore,
+        knowledge_service: IKnowledgeService,
         logger: Logger,
     ) -> None:
         self._storage = file_storage
         self._agentic = agentic_store
+        self._knowledge = knowledge_service
         self._logger = logger
 
     async def upload(
@@ -132,6 +136,27 @@ class FilesService:
             mime_type=mime_type,
             size=len(data),
         )
+        # Fire-and-forget ingestion into the knowledge base. We don't
+        # block the upload response on it — chunking + embedding can
+        # take a few seconds for a big PDF, and the user shouldn't wait
+        # to see the file in their attachment list. Failures are logged
+        # but don't bubble back to the caller; the file is still
+        # readable via `read_attachment` either way.
+        #
+        # NOT a TaskGroup or shared background scheduler — those are
+        # follow-up work. asyncio.create_task is fine for v1 because
+        # the task lifetime is bounded by the request loop, and
+        # KnowledgeService is fully async without external blocking.
+        asyncio.create_task(
+            self._ingest_safely(
+                owner_id=owner_id,
+                file_id=file_id,
+                filename=filename,
+                mime_type=mime_type,
+                data=data,
+            )
+        )
+
         return FileView(
             id=file_id,
             owner_id=owner_id,
@@ -140,6 +165,31 @@ class FilesService:
             size_bytes=len(data),
             created_at=created_at,
         )
+
+    async def _ingest_safely(
+        self,
+        *,
+        owner_id: str,
+        file_id: str,
+        filename: str,
+        mime_type: str,
+        data: bytes,
+    ) -> None:
+        try:
+            await self._knowledge.ingest_file(
+                owner_id=owner_id,
+                file_id=file_id,
+                filename=filename,
+                mime_type=mime_type,
+                data=data,
+            )
+        except Exception as exc:  # noqa: BLE001 — background task swallows
+            self._logger.error(
+                "file.ingest_failed",
+                file_id=file_id,
+                owner_id=owner_id,
+                error=repr(exc),
+            )
 
     async def get(self, *, file_id: str, owner_id: str) -> FileView:
         view = await self._load(file_id)
@@ -173,9 +223,51 @@ class FilesService:
         # metadata (which would 500 on read).
         await self._agentic.store.adelete(_NAMESPACE, file_id)
         await self._storage.delete(file_id)
+        # Drop the vector-store chunks too — these would otherwise
+        # outlive their source. Cleanup is best-effort: vector-store
+        # outage shouldn't keep a user from deleting their file.
+        try:
+            await self._knowledge.delete_file_chunks(
+                owner_id=owner_id, file_id=file_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning(
+                "file.kb_cleanup_failed",
+                file_id=file_id,
+                owner_id=owner_id,
+                error=repr(exc),
+            )
         self._logger.info(
             "file.deleted", file_id=file_id, owner_id=owner_id
         )
+
+    async def set_caption(
+        self, *, file_id: str, owner_id: str, caption: str
+    ) -> None:
+        """Stash a short LLM-generated description on the file's
+        metadata. Called from `AttachmentCompactionMiddleware` the
+        FIRST time a file is evicted from the model's context — the
+        caption then enriches every subsequent eviction stub for that
+        file (so the model knows what was there even after the bytes
+        leave context).
+
+        Ownership-checked. No-op (logs only) if the file is gone."""
+        item = await self._agentic.store.aget(_NAMESPACE, file_id)
+        if item is None:
+            self._logger.warning(
+                "file.caption_set_missing", file_id=file_id, owner_id=owner_id
+            )
+            return
+        meta = dict(item.value or {})
+        if str(meta.get("owner_id", "")) != owner_id:
+            self._logger.warning(
+                "file.caption_set_cross_owner",
+                file_id=file_id,
+                owner_id=owner_id,
+            )
+            return
+        meta["caption"] = caption
+        await self._agentic.store.aput(_NAMESPACE, file_id, meta)
 
     async def _load(self, file_id: str) -> FileView | None:
         item = await self._agentic.store.aget(_NAMESPACE, file_id)
@@ -185,6 +277,7 @@ class FilesService:
 
 
 def _to_view(key: str, value: dict[str, Any]) -> FileView:
+    raw_caption = value.get("caption")
     return FileView(
         id=key,
         owner_id=str(value.get("owner_id", "")),
@@ -192,4 +285,5 @@ def _to_view(key: str, value: dict[str, Any]) -> FileView:
         mime_type=str(value.get("mime_type", "application/octet-stream")),
         size_bytes=int(value.get("size_bytes", 0) or 0),
         created_at=str(value.get("created_at", _now_iso())),
+        caption=str(raw_caption) if isinstance(raw_caption, str) and raw_caption else None,
     )

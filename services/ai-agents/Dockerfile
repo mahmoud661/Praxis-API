@@ -23,6 +23,15 @@ COPY pytest.ini ./
 RUN pytest
 
 RUN useradd -m -u 1000 app
+
+# Pre-create the file-storage dir AND chown it to `app` BEFORE the
+# volume mount overlays it. Docker initialises a fresh named volume
+# with the contents (and ownership) of the mount point, so this gives
+# the volume `app:app` ownership on first use. Without this, the
+# volume starts root-owned and uploads fail with PermissionError
+# the moment the app tries to create a subdir under it.
+RUN mkdir -p /var/lib/praxis/files && chown -R app:app /var/lib/praxis/files
+
 USER app
 
 EXPOSE 8000

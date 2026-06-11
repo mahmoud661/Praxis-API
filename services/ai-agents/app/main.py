@@ -39,6 +39,14 @@ def create_app() -> FastAPI:
         litellm = container.resolve("LiteLLMClient")
         await registry.validate_against(litellm)
 
+        # Bring up the vector store collection (idempotent). Qdrant
+        # backend issues a create_collection if missing + ensures the
+        # owner_id payload index. InMemory backend is a no-op. Failing
+        # here is a real misconfig (wrong URL, auth, etc.) — surface it
+        # at boot, not on the first kb_search call.
+        await container.resolve("IVectorStore").ensure_ready()
+        logger.info("vector_store.ready")
+
         publisher = container.resolve("EventPublisher")
         consumer = container.resolve("EventConsumer")
 
@@ -64,6 +72,9 @@ def create_app() -> FastAPI:
             # Close the LiteLLM admin client (httpx). Also a no-op if
             # nobody touched it (test boots, etc.).
             await container.resolve("LiteLLMClient").aclose()
+            # Close the embedding client's httpx pool. Same no-op-if-
+            # unused semantics as the LiteLLM admin client above.
+            await container.resolve("IEmbeddingClient").aclose()
             await agentic_store.dispose()
 
     app = FastAPI(title="ai-agents-service", lifespan=lifespan)

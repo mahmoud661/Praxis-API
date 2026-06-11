@@ -1,4 +1,5 @@
-"""Mounted at /v1. Endpoints: POST /files, GET /files/{id}, DELETE /files/{id}."""
+"""Mounted at /v1. Endpoints: POST /files, GET /files/{id},
+GET /files/{id}/content (raw bytes), DELETE /files/{id}."""
 
 from __future__ import annotations
 
@@ -29,6 +30,17 @@ class FilesRoute(BaseRoute):
             self._controller.get_file,
             methods=["GET"],
             response_model=FileResponse,
+            tags=["files"],
+        )
+        # Raw bytes — used by the frontend `<img>` tag for image
+        # thumbnails on history reload (the upload's Blob URL is gone
+        # by then). Path is separate from the metadata endpoint so
+        # there's no Accept-header-based dispatch to maintain.
+        self.router.add_api_route(
+            "/files/{file_id}/content",
+            self._controller.get_file_content,
+            methods=["GET"],
+            response_model=None,
             tags=["files"],
         )
         self.router.add_api_route(

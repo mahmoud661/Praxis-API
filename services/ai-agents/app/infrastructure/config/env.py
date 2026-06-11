@@ -49,6 +49,62 @@ class Env(BaseSettings):
     # uploads persist across pod restarts.
     files_local_dir: str = "/tmp/praxis-files"
 
+    # Vector store backend. `qdrant` (default) connects to the URL
+    # below; `memory` keeps everything in-process (dev smoke runs and
+    # any setup where Qdrant isn't reachable). Like `files_storage_backend`
+    # the choice is locked at boot.
+    vector_store_backend: str = "qdrant"
+    # Qdrant connection. `qdrant_url` is the HTTP base URL
+    # (`http://qdrant:6333` in compose). `qdrant_api_key` is required
+    # for Qdrant Cloud, optional/None for self-hosted with no auth.
+    # `qdrant_collection` is the single collection name used for ALL
+    # users — per-user isolation is enforced via a payload filter on
+    # `owner_id`, not separate collections (Qdrant performs better with
+    # one large filtered collection than thousands of small ones).
+    qdrant_url: str = "http://qdrant:6333"
+    qdrant_api_key: str | None = None
+    qdrant_collection: str = "praxis_knowledge"
+
+    # Embedding model the LiteLLM proxy routes to. Picked to match the
+    # vector dimension we provision in Qdrant (`embedding_vector_size`).
+    # If you change one, change the other together — mismatched dims
+    # silently corrupt search results.
+    embedding_model: str = "text-embedding-3-small"
+    embedding_vector_size: int = 1536  # text-embedding-3-small default
+
+    # How many of the MOST RECENT user turns keep their attachments
+    # at full fidelity. Older attachments get compacted to a stub by
+    # `AttachmentCompactionMiddleware` (image bytes drop, tool-result
+    # text drops, replaced with `[Attachment cleared — was: <caption>.
+    # Re-fetch via read_attachment(id).]`). Lower = more aggressive
+    # eviction = lower per-turn token cost on long conversations.
+    # 0 = evict everything older than the current turn.
+    attachment_compaction_keep_turns: int = 3
+
+    # Text/PDF attachment pagination. The preload middleware injects
+    # only the FIRST `attachment_preview_chars` of an attached file —
+    # enough for the model to know what the file is and answer most
+    # questions — with a footer telling it to call `read_attachment`
+    # with an offset when it needs more. Each explicit tool call then
+    # returns up to `attachment_page_chars` per page. Keeps a 500KB
+    # CSV from dumping itself into the context on upload.
+    attachment_preview_chars: int = 4_000
+    attachment_page_chars: int = 20_000
+
+    # Conversation-history compaction (CompactionMiddleware) — keeps long
+    # threads under the model's context window. Levels 1-3 (collapse /
+    # truncate / microcompact) are free; Level 4 replaces old history
+    # with a structured LLM summary once the effective view crosses
+    # `compaction_trigger_fraction` of `compaction_max_input_tokens`.
+    # `compaction_max_input_tokens` is declared here (not introspected)
+    # because the LiteLLM proxy hides the upstream model's profile —
+    # set it to the real context window of whatever `litellm_model`
+    # routes to. `compaction_keep_messages` is how many of the most
+    # recent messages survive a Level 4 summarization untouched.
+    compaction_max_input_tokens: int = 128_000
+    compaction_trigger_fraction: float = 0.85
+    compaction_keep_messages: int = 10
+
     @property
     def kafka_broker_list(self) -> list[str]:
         return [b.strip() for b in self.kafka_brokers.split(",") if b.strip()]

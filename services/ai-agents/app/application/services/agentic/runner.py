@@ -26,6 +26,8 @@ from typing import Any, Awaitable, Callable
 
 from langchain_core.messages import HumanMessage
 
+from ....application.services._errors import FileNotFoundError
+from ....domain.IServices.i_files_service import IFilesService
 from ....domain.ports.logger import Logger
 from .event_normalizer import normalize_event
 from .main_agent import MainAgent
@@ -37,26 +39,68 @@ class AgentRunner:
     def __init__(
         self,
         main_agent: MainAgent,
+        files: IFilesService,
         logger: Logger,
     ) -> None:
         # Container resolves `main_agent: MainAgent` from token "MainAgent".
+        # `files` is needed to snapshot attachment metadata onto the
+        # persisted HumanMessage so the frontend can render the chips
+        # after a reload (file might be deleted later — the snapshot
+        # still tells the UI "this was attached: report.pdf").
         self._main_agent = main_agent
+        self._files = files
         self._logger = logger
 
     async def run(
         self,
         *,
         thread_id: str,
+        owner_id: str,
         user_message: str,
+        attachments: list[str] | None = None,
         on_event: OnEvent,
     ) -> None:
         """Stream a single user turn through the graph. Pushes every event
         to `on_event`. Always emits a terminal `run.end` event in `finally`,
         so consumers (and any reconnecting clients via the stream replay)
-        always see a clean close — success, error, or cancellation."""
+        always see a clean close — success, error, or cancellation.
+
+        `owner_id` lands in the LangGraph config so tools (read_attachment,
+        kb_search) can resolve per-user scope. `attachments` is the list
+        of file ids the user attached for THIS turn; the preload middleware
+        picks them up and synthesizes a fake `read_attachment` tool call
+        per id so the model sees the file content as if it had fetched it.
+        """
         graph = self._main_agent.get()
-        config = {"configurable": {"thread_id": thread_id}}
-        inputs = {"messages": [HumanMessage(content=user_message)]}
+        attachment_ids = list(attachments or [])
+        config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "owner_id": owner_id,
+                # Empty list when no files attached this turn. The
+                # middleware keys off list emptiness — present-and-empty
+                # is the "user sent text only" signal, missing key would
+                # be a config-shape bug.
+                "attachments": attachment_ids,
+            }
+        }
+        # Snapshot file metadata into the message itself so reloaded
+        # history can render attachment chips without an extra round-
+        # trip per file, AND so the chip still shows even if the file
+        # is later deleted by the user. Snapshot is best-effort: ids
+        # we can't resolve (cross-owner, deleted between upload and
+        # send) are silently dropped from the snapshot.
+        attachments_meta = await self._snapshot_attachments(
+            owner_id=owner_id, file_ids=attachment_ids
+        )
+        human_extra: dict[str, Any] = {}
+        if attachments_meta:
+            human_extra["attachments"] = attachments_meta
+        inputs = {
+            "messages": [
+                HumanMessage(content=user_message, additional_kwargs=human_extra)
+            ]
+        }
 
         self._logger.info("agent.run.start", thread_id=thread_id)
         try:
@@ -76,3 +120,29 @@ class AgentRunner:
         finally:
             await on_event({"type": "run.end", "thread_id": thread_id})
             self._logger.info("agent.run.end", thread_id=thread_id)
+
+    async def _snapshot_attachments(
+        self, *, owner_id: str, file_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Resolve each file id to a small metadata snapshot the
+        message persists alongside its text content."""
+        out: list[dict[str, Any]] = []
+        for file_id in file_ids:
+            try:
+                view = await self._files.get(file_id=file_id, owner_id=owner_id)
+            except FileNotFoundError:
+                self._logger.warning(
+                    "agent.run.attachment_missing",
+                    file_id=file_id,
+                    owner_id=owner_id,
+                )
+                continue
+            out.append(
+                {
+                    "id": view.id,
+                    "filename": view.filename,
+                    "mime_type": view.mime_type,
+                    "size_bytes": view.size_bytes,
+                }
+            )
+        return out

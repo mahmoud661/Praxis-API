@@ -87,11 +87,31 @@ class HistoryToolCallResponse(BaseModel):
     result: str | None = None
 
 
+class HistoryAttachmentResponse(BaseModel):
+    """Wire shape for one persisted attachment on a user message.
+    Frontend renders these as chips/thumbnails. `id` doubles as the
+    handle for `GET /v1/files/{id}/content` if the frontend wants to
+    fetch bytes for a thumbnail."""
+
+    id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+
+
 class HistoryMessageResponse(BaseModel):
     id: str
     role: str
     content: str
     tool_calls: list[HistoryToolCallResponse] = Field(default_factory=list)
+    attachments: list[HistoryAttachmentResponse] = Field(default_factory=list)
+    # Resolved content references stamped on assistant messages by
+    # `ContentReferenceMiddleware`. Each entry has `kind` +
+    # `matched_text` + `start_idx` + `end_idx` + a payload keyed to
+    # the kind (`attachment` block or `items` list for citations).
+    # Wire shape is `list[dict]` because the union of variants is
+    # easier to evolve than a Pydantic discriminated union here.
+    content_references: list[dict] = Field(default_factory=list)
 
 
 class HistoryResponse(BaseModel):
@@ -252,6 +272,16 @@ class ThreadsController:
                         )
                         for tc in m.tool_calls
                     ],
+                    attachments=[
+                        HistoryAttachmentResponse(
+                            id=a.id,
+                            filename=a.filename,
+                            mime_type=a.mime_type,
+                            size_bytes=a.size_bytes,
+                        )
+                        for a in m.attachments
+                    ],
+                    content_references=list(m.content_references),
                 )
                 for m in messages
             ],

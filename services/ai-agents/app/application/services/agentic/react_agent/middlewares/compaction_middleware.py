@@ -506,8 +506,26 @@ async def _agenerate_summary(model, messages: list, custom_instructions: str | N
 def _determine_cutoff(messages: list[AnyMessage], keep: ContextSize) -> int:
     kind, value = keep
     if kind == "messages":
-        return max(0, len(messages) - int(value))
-    return max(0, len(messages) - 10)
+        base = max(0, len(messages) - int(value))
+    else:
+        base = max(0, len(messages) - 10)
+    return _align_to_human_boundary(messages, base)
+
+
+def _align_to_human_boundary(messages: list[AnyMessage], cutoff: int) -> int:
+    """Snap `cutoff` forward to the next HumanMessage so the kept tail
+    starts at a user turn. Without this, the tail can open with a
+    ToolMessage whose parent AIMessage (carrying the tool_calls) was
+    summarized away — OpenAI rejects that history outright with
+    "'tool' must be a response to a preceding 'tool_calls'".
+
+    If no HumanMessage exists at or after `cutoff`, fall back to the
+    unaligned index — a degenerate all-tool tail is better than
+    summarizing the entire thread including the live turn."""
+    for idx in range(cutoff, len(messages)):
+        if isinstance(messages[idx], HumanMessage):
+            return idx
+    return cutoff
 
 
 def _build_effective_messages(
@@ -564,11 +582,16 @@ class CompactionMiddleware(AgentMiddleware):
         model,
         *,
         config: CompactionConfig | None = None,
+        max_input_tokens: int | None = None,
     ) -> None:
         super().__init__()
         self._model = model
         self._config = config or CompactionConfig()
-        self._max_input_tokens = _get_max_input_tokens(model)
+        # Explicit override first — proxy-fronted models (LiteLLM) hide
+        # the upstream profile, so introspection returns None and every
+        # `("fraction", ...)` trigger silently never fires. Callers that
+        # know the real context window MUST pass it.
+        self._max_input_tokens = max_input_tokens or _get_max_input_tokens(model)
         self._lock = threading.Lock()
         self._thread_states: dict[str, _ThreadState] = {}
         self._fallback_thread_id = f"session_{uuid.uuid4().hex[8:]}"
