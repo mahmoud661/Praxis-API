@@ -507,10 +507,17 @@ def _flatten_content(content: object) -> str:
     `additional_kwargs.attachments` anyway, so dropping image blocks
     here doesn't lose information.
 
-    Plumbing-text guard: an early preload version appended an
-    `[Attached image aliases: …]` text block to the HumanMessage, and
-    threads persisted before the fix still carry it. Skip it on the
-    way out so those bubbles render only what the user actually typed."""
+    Plumbing-text guard: some text blocks inside a HumanMessage are
+    middleware plumbing, not the user's words, and must not leak into
+    the rendered bubble:
+      - `[Attached image aliases: …]` — an early preload version.
+      - `[Attachment cleared — …]` / `[Attachment cleared.` — the
+        AttachmentCompactionMiddleware rewrites old image blocks into
+        these eviction stubs IN PERSISTED STATE, so on history reload
+        they'd otherwise appear as the user's own text (with the raw
+        file UUID).
+    Both are skipped here so the bubble shows only what the user typed;
+    the attachment chip still renders from `additional_kwargs.attachments`."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -520,12 +527,22 @@ def _flatten_content(content: object) -> str:
                 parts.append(block)
             elif isinstance(block, dict):
                 text = block.get("text")
-                if isinstance(text, str) and not text.startswith(
-                    "[Attached image aliases:"
-                ):
+                if isinstance(text, str) and not _is_plumbing_text(text):
                     parts.append(text)
         return "".join(parts)
     return str(content) if content is not None else ""
+
+
+# Prefixes that mark a text block as middleware plumbing rather than
+# the user's own words (see `_flatten_content`).
+_PLUMBING_TEXT_PREFIXES = (
+    "[Attached image aliases:",
+    "[Attachment cleared",
+)
+
+
+def _is_plumbing_text(text: str) -> bool:
+    return text.startswith(_PLUMBING_TEXT_PREFIXES)
 
 
 _ROLE_BY_TYPE: dict[str, str] = {

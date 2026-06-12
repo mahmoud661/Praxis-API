@@ -1,16 +1,25 @@
 """
 Agentic LLM orchestration (LangChain / LangGraph).
 
-Contains:
-  - `react_agent/` — the handrolled React agent framework (StateGraph builder,
-    middleware, state machine, structured output, etc.). Its modules use
-    bare absolute imports like `from react_agent.X import Y`, so we add
-    THIS folder to `sys.path` below — that makes `react_agent` resolvable
-    as a top-level module without rewriting every import site.
-  - `main_agent.py` — the one agent the service exposes. Builds a compiled
-    LangGraph by wiring the react_agent framework with a state machine.
-  - `runner.py` — `AgentRunner` orchestrates a graph run, streams events
-    into Redis, hands them to a transport-agnostic `on_event` callback.
+Layout + flow:
+
+    api → controller → service → runner → agents/<name> → react_agent
+
+  - `react_agent/` — the React agent LIBRARY (StateGraph builder,
+    middleware incl. the attachment system, state machine, structured
+    output). Destined for extraction as a standalone package: it holds
+    NO app imports and NO storage — everything environmental enters
+    through the Protocols in `react_agent/ports.py` and
+    `react_agent/references.py`. Its core modules use bare absolute
+    imports (`from react_agent.X import Y`), so we add THIS folder to
+    `sys.path` below.
+  - `agents/` — one folder per agent (`agents/general/`), each with its
+    own `agent.py` (DI seam + spec), `graph.py` (assembly), `prompts/`,
+    `sections.py`, `tools/`, `middlewares/`. Agents are the ONLY thing
+    that imports the react_agent runtime.
+  - `runner.py` — `AgentRunner` resolves an agent via the registry and
+    streams its graph's events to a transport-agnostic `on_event`
+    callback. It never touches react_agent directly.
 """
 
 from __future__ import annotations

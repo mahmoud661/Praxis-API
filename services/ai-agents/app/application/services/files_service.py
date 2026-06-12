@@ -100,6 +100,12 @@ class FilesService:
         self._agentic = agentic_store
         self._knowledge = knowledge_service
         self._logger = logger
+        # Strong references to in-flight fire-and-forget ingestion
+        # tasks. asyncio only holds a WEAK reference to a bare
+        # create_task result, so without this the GC can collect a task
+        # mid-await and ingestion silently never finishes. Each task
+        # removes itself on completion.
+        self._ingest_tasks: set[asyncio.Task[None]] = set()
 
     async def upload(
         self,
@@ -147,7 +153,9 @@ class FilesService:
         # follow-up work. asyncio.create_task is fine for v1 because
         # the task lifetime is bounded by the request loop, and
         # KnowledgeService is fully async without external blocking.
-        asyncio.create_task(
+        # We DO keep a strong reference (see `_ingest_tasks`) and clear
+        # it on completion so the GC can't reap the task mid-flight.
+        task = asyncio.create_task(
             self._ingest_safely(
                 owner_id=owner_id,
                 file_id=file_id,
@@ -156,6 +164,8 @@ class FilesService:
                 data=data,
             )
         )
+        self._ingest_tasks.add(task)
+        task.add_done_callback(self._ingest_tasks.discard)
 
         return FileView(
             id=file_id,

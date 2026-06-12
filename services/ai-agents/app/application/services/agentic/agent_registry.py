@@ -1,9 +1,18 @@
 """
 AgentRegistry — discovers `BaseAgent` subclasses + serves them by spec id.
 
-Discovery scans `application/services/agentic/agents/*.py`, imports each
-module, and finds every `BaseAgent` subclass defined there. Mirrors the
-auto-mount pattern `mount_routes()` uses for HTTP routes.
+Discovery scans the agents folder for AGENT PACKAGES — one folder per
+agent, each exposing its `BaseAgent` subclass in an `agent.py` module:
+
+    agents/
+      general/
+        agent.py       ← discovered here
+        graph.py, sections.py, prompts/, tools/, middlewares/
+
+Bare `*.py` modules directly under `agents/` are still discovered too
+(the original flat layout), so a quick prototype agent doesn't need
+the full folder ceremony. Mirrors the auto-mount pattern
+`mount_routes()` uses for HTTP routes.
 
 Two contracts:
 
@@ -79,14 +88,18 @@ class AgentRegistry:
         """Scan the agents folder and instantiate one of each subclass.
         Idempotent; second call is a no-op.
 
+        Two layouts per entry, both supported:
+          - PACKAGE: a folder with `__init__.py` + `agent.py` — the
+            convention for real agents (tools/, prompts/, sections.py
+            live next to the class). We import `<pkg>.<folder>.agent`.
+          - MODULE: a bare `<name>.py` — the original flat layout,
+            still fine for prototypes.
+
         Instantiation is cheap (constructor doesn't compile the graph —
         that's deferred to `BaseAgent.get()` on first use)."""
         if self._discovered:
             return
-        for py_file in sorted(self._folder.glob("*.py")):
-            if py_file.name.startswith("_"):
-                continue
-            mod_name = f"{self._package}.{py_file.stem}"
+        for mod_name, origin in self._agent_modules():
             module = importlib.import_module(mod_name)
             for name, obj in inspect.getmembers(module, inspect.isclass):
                 # Only pick classes DEFINED in this module — skip
@@ -107,7 +120,7 @@ class AgentRegistry:
                 if spec_id in self._agents:
                     raise AgentRegistryError(
                         f"duplicate agent spec id {spec_id!r} "
-                        f"(class {name} in {py_file.name})"
+                        f"(class {name} in {origin})"
                     )
                 self._agents[spec_id] = instance
                 self._logger.info(
@@ -121,6 +134,32 @@ class AgentRegistry:
             raise AgentRegistryError(
                 f"no BaseAgent subclasses found in {self._folder}"
             )
+
+    def _agent_modules(self) -> list[tuple[str, str]]:
+        """(module_path, human_origin) pairs to import, sorted for
+        deterministic registration order."""
+        out: list[tuple[str, str]] = []
+        for entry in sorted(self._folder.iterdir()):
+            if entry.name.startswith("_"):
+                continue
+            if entry.is_dir():
+                if not (entry / "__init__.py").exists():
+                    continue  # not a package (e.g. __pycache__, stray dir)
+                if not (entry / "agent.py").exists():
+                    raise AgentRegistryError(
+                        f"agent package {entry.name!r} has no agent.py — "
+                        "every agent folder must expose its BaseAgent "
+                        "subclass in agent.py"
+                    )
+                out.append(
+                    (
+                        f"{self._package}.{entry.name}.agent",
+                        f"{entry.name}/agent.py",
+                    )
+                )
+            elif entry.suffix == ".py":
+                out.append((f"{self._package}.{entry.stem}", entry.name))
+        return out
 
     async def validate_against(self, litellm: LiteLLMClient) -> None:
         """Cross-check each agent's spec against LiteLLM's model catalog.
@@ -163,6 +202,18 @@ class AgentRegistry:
 
     def get(self, spec_id: str) -> BaseAgent | None:
         return self._agents.get(spec_id)
+
+    def default_agent(self) -> BaseAgent:
+        """The agent behind `default_id()`. The runner (and anything
+        else that executes a thread without an explicit `agent_id`)
+        goes through here — callers never touch the react_agent
+        runtime directly, only the agent."""
+        agent = self._agents.get(self.default_id())
+        if agent is None:
+            raise AgentRegistryError(
+                "default_agent() called before discover() registered any agents"
+            )
+        return agent
 
     def specs(self) -> list[AgentSpec]:
         """All registered specs, sorted by id for stable ordering."""

@@ -42,7 +42,7 @@ class TitleGenerator:
 
     def _client(self) -> ChatOpenAI:
         if self._model is None:
-            # Same LiteLLM-compatible config as MainAgent. Cap tokens
+            # Same LiteLLM-compatible config as the agents. Cap tokens
             # tight — five words won't exceed ~20 tokens, and the model
             # occasionally tries to over-explain when given more room.
             self._model = ChatOpenAI(

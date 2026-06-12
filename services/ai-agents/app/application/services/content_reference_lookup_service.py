@@ -1,5 +1,7 @@
 """
-ContentReferenceLookupService — the concrete `IContentReferenceLookup`.
+ContentReferenceLookupService — the app's implementation of the
+react_agent library's `ReferenceLookup` port (registered under the DI
+token `"IContentReferenceLookup"`).
 
 Resolves model-emitted aliases (`turn3image1`, `citeturn0search2`)
 back to durable entities by walking the thread's LangGraph state:
@@ -7,25 +9,27 @@ back to durable entities by walking the thread's LangGraph state:
   - `turn{N}{file|image|pdf|...}{M}` →
       `HumanMessage[#N].additional_kwargs.attachments[M-of-category]`
   - `turn{N}{search|news}{M}` →
-      structured `kb_search` hits the tool stashed under
-      `("kb_search_hits",) → {thread_id}:{tool_call_id}` keyed by the
-      tool call surfacing this turn
+      structured `kb_search` hits the tool stashed under the
+      per-thread sequence key (see `agentic/kb_citation_store.py`) —
+      `turn{N}` here IS the kb_search call's sequence number.
 
 Ownership enforced — cross-user lookups return `None` so the resolver
 silently drops the alias and the frontend renders it as plain text.
-
-Auto-bound to the DI token `"IContentReferenceLookup"`.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 
-from .agentic.main_agent import MainAgent
-from .agentic.tools.kb_search import _KB_HITS_NAMESPACE
-from ...domain.dtos.content_reference_dto import AttachmentRef, WebpageRef
+from .agentic.agent_registry import AgentRegistry
+from .agentic.kb_citation_store import KB_HITS_NAMESPACE, kb_hits_key
+from ...domain.dtos.content_reference_dto import (
+    AttachmentRef,
+    WebpageRef,
+    category_for_mime,
+)
 from ...domain.ports.logger import Logger
 from ...infrastructure.agentic.agentic_store import AgenticStore
 
@@ -38,11 +42,11 @@ class ContentReferenceLookupService:
 
     def __init__(
         self,
-        main_agent: MainAgent,
+        agent_registry: AgentRegistry,
         agentic_store: AgenticStore,
         logger: Logger,
     ) -> None:
-        self._main_agent = main_agent
+        self._registry = agent_registry
         self._agentic = agentic_store
         self._logger = logger
 
@@ -90,21 +94,14 @@ class ContentReferenceLookupService:
         category: str,
         item_index: int,
     ) -> WebpageRef | None:
-        del owner_id, category, turn_index  # see resolution comment below
-        # Citations from kb_search aren't strictly keyed by turn — the
-        # tool uses `turn0search{n}` regardless of which user turn
-        # triggered the call. We resolve by finding the most recent
-        # kb_search tool call in the thread's history and returning
-        # its item_index'th hit. The model rarely calls kb_search more
-        # than once per response; if it ever does, future iterations
-        # can disambiguate by tool_call_id encoded in the alias.
-        messages = await self._thread_messages(thread_id=thread_id)
-        tool_call_id = _latest_kb_search_tool_call_id(messages)
-        if not tool_call_id:
-            return None
-        hits = await self._load_kb_hits(
-            thread_id=thread_id, tool_call_id=tool_call_id
-        )
+        del owner_id, category
+        # `turn_index` IS the kb_search call's per-thread sequence
+        # number — kb_search mints `citeturn{seq}search{n}` and stashes
+        # that call's hits under the matching `seq` key. So a citation
+        # resolves against the EXACT call that produced it, even when
+        # the model ran several kb_search calls in one reply (they no
+        # longer all collide on `turn0`).
+        hits = await self._load_kb_hits(thread_id=thread_id, seq=turn_index)
         zero_idx = max(item_index - 1, 0)
         if zero_idx >= len(hits):
             return None
@@ -124,7 +121,7 @@ class ContentReferenceLookupService:
         doesn't exist or has no messages — the caller treats both as
         "nothing to resolve"."""
         try:
-            graph = self._main_agent.get()
+            graph = self._registry.default_agent().get()
             state = await graph.aget_state(
                 {"configurable": {"thread_id": thread_id}}
             )
@@ -138,10 +135,11 @@ class ContentReferenceLookupService:
         return list(state.values.get("messages") or [])
 
     async def _load_kb_hits(
-        self, *, thread_id: str, tool_call_id: str
+        self, *, thread_id: str, seq: int
     ) -> list[dict[str, Any]]:
-        key = f"{thread_id}:{tool_call_id}"
-        item = await self._agentic.store.aget(_KB_HITS_NAMESPACE, key)
+        item = await self._agentic.store.aget(
+            KB_HITS_NAMESPACE, kb_hits_key(thread_id, seq)
+        )
         if item is None or not isinstance(item.value, dict):
             return []
         raw = item.value.get("hits")
@@ -175,44 +173,13 @@ def _attachments_of_msg(msg: HumanMessage) -> list[dict[str, Any]]:
 
 def _matches_attachment_category(meta: dict[str, Any], category: str) -> bool:
     """Map the alias category to a MIME-type filter. `file` is the
-    permissive bucket — matches anything; `image`, `pdf`, `audio`,
-    `video` are MIME-prefix gated."""
-    mime = str(meta.get("mime_type", ""))
+    permissive bucket — matches anything; the specific categories are
+    gated via the SAME `category_for_mime` the preload middleware mints
+    from, so a minted alias always resolves under the rule that minted
+    it (no mint/resolve drift)."""
     if category == "file":
         return True
-    if category == "image":
-        return mime.startswith("image/")
-    if category == "pdf":
-        return mime == "application/pdf"
-    if category == "audio":
-        return mime.startswith("audio/")
-    if category == "video":
-        return mime.startswith("video/")
-    return False
-
-
-def _latest_kb_search_tool_call_id(messages: list[Any]) -> str | None:
-    """Walk backwards from the end of history; return the first
-    ToolMessage's `tool_call_id` where its paired AIMessage tool_call
-    was named `kb_search`."""
-    # Build an index of AIMessage tool_call ids → tool name so we can
-    # look up by ToolMessage.tool_call_id without an O(n^2) scan.
-    tool_call_names: dict[str, str] = {}
-    for msg in messages:
-        if isinstance(msg, AIMessage):
-            for call in msg.tool_calls or []:
-                cid = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
-                cname = (
-                    call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
-                )
-                if isinstance(cid, str) and isinstance(cname, str):
-                    tool_call_names[cid] = cname
-    for msg in reversed(messages):
-        if isinstance(msg, ToolMessage):
-            cid = getattr(msg, "tool_call_id", None)
-            if isinstance(cid, str) and tool_call_names.get(cid) == "kb_search":
-                return cid
-    return None
+    return category_for_mime(str(meta.get("mime_type", ""))) == category
 
 
 def _optional_str(value: Any) -> str | None:

@@ -42,7 +42,7 @@ from langchain_core.messages import RemoveMessage
 
 from ...domain.IRepos.i_thread_repo import IThreadRepo
 from ...domain.ports.logger import Logger
-from .agentic.main_agent import MainAgent
+from .agentic.agent_registry import AgentRegistry
 from .agentic.run_manager import RunManager
 from ._errors import (
     InvalidTurnTargetError,
@@ -61,12 +61,12 @@ class TurnsService:
     def __init__(
         self,
         thread_repo: IThreadRepo,
-        main_agent: MainAgent,
+        agent_registry: AgentRegistry,
         run_manager: RunManager,
         logger: Logger,
     ) -> None:
         self._repo = thread_repo
-        self._main_agent = main_agent
+        self._registry = agent_registry
         self._run_manager = run_manager
         self._logger = logger
 
@@ -120,7 +120,7 @@ class TurnsService:
         if self._run_manager.is_active(thread_id):
             raise TurnInProgressError(thread_id)
 
-        graph = self._main_agent.get()
+        graph = self._registry.default_agent().get()
         config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
         state = await graph.aget_state(config)
         messages = list(state.values.get("messages") or [])
@@ -142,11 +142,15 @@ class TurnsService:
                 f"{action} target must be a user message; got {msg_type!r}",
             )
 
-        # For retry, the content is whatever the user originally said.
+        # For retry, the content is whatever the user originally typed.
+        # The persisted HumanMessage content may be a LIST of content
+        # blocks — AttachmentPreloadMiddleware rewrites it that way when
+        # the turn carried images (text block + image_url blocks). We
+        # must extract ONLY the text, never `str(list)` — that would
+        # post the Python repr of the block list (base64 data URLs and
+        # all) as the regenerated user message.
         if content is None:
-            original = getattr(target, "content", "")
-            content = original if isinstance(original, str) else str(original)
-            content = content.strip()
+            content = _user_text(getattr(target, "content", "")).strip()
         if not content:
             raise InvalidTurnTargetError(f"{action} content resolved to empty")
 
@@ -190,6 +194,30 @@ class TurnsService:
         thread = await self._repo.get(thread_id)
         if thread is None or thread.owner_id != owner_id:
             raise ThreadNotFoundError(thread_id)
+
+
+def _user_text(content: Any) -> str:
+    """Pull the user's typed text out of a HumanMessage's content.
+
+    `content` is a plain string for text-only turns, or a list of
+    content blocks once the preload middleware injected image blocks.
+    For the list case we concatenate only the text blocks and drop
+    everything else (image_url blocks etc.) — the image is re-attached
+    separately via the preserved attachment ids, so it must not bleed
+    into the user message text as a base64 repr."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return ""
 
 
 def _attachment_ids(message: Any) -> list[str]:

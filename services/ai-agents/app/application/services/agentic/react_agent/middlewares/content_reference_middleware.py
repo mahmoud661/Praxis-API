@@ -16,7 +16,7 @@ Flow:
 
   1. Model returns its `ModelResponse(result=[AIMessage, ...])`.
   2. For each AIMessage in `response.result` with non-empty text, we
-     scan the content, hit the `IContentReferenceLookup` port to
+     scan the content, hit the `ReferenceLookup` port to
      resolve every parsed alias, and stash the resolved references on
      the message's `additional_kwargs`.
   3. The unchanged response object is returned. LangGraph reduces the
@@ -55,8 +55,8 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage
 from langchain_core.runnables.config import var_child_runnable_config
 
-from ......domain.ports.content_reference_lookup import IContentReferenceLookup
-from ...content_references import resolve as resolve_references
+from ..references import ReferenceLookup
+from ..references import resolve as resolve_references
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -74,7 +74,7 @@ class ContentReferenceMiddleware(AgentMiddleware):
     once at agent setup time from the DI container.
     """
 
-    def __init__(self, lookup: IContentReferenceLookup) -> None:
+    def __init__(self, lookup: ReferenceLookup) -> None:
         super().__init__()
         self._lookup = lookup
 
@@ -114,7 +114,7 @@ class ContentReferenceMiddleware(AgentMiddleware):
 async def _annotate_message(
     *,
     message: Any,
-    lookup: IContentReferenceLookup,
+    lookup: ReferenceLookup,
     thread_id: str,
     owner_id: str,
 ) -> None:

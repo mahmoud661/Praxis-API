@@ -2,9 +2,20 @@
 Application-layer exceptions. Lives in a `_`-prefixed module so the DI
 auto-register globber skips it (it only loads `*.py` whose name doesn't
 start with `_`).
+
+`FileNotFoundError` / `UnsupportedMimeTypeError` subclass the
+react_agent library's error contract (`AttachmentNotFoundError` /
+`UnsupportedContentError`): the library's attachment system catches
+ITS OWN exception types, and our services satisfy that contract simply
+by raising these — no adapters, no re-mapping at the boundary.
 """
 
 from __future__ import annotations
+
+from .agentic.react_agent.ports import (
+    AttachmentNotFoundError,
+    UnsupportedContentError,
+)
 
 
 class ThreadNotFoundError(Exception):
@@ -37,9 +48,11 @@ class InvalidThreadConfigError(Exception):
     with the message intact so the frontend can surface it."""
 
 
-class FileNotFoundError(Exception):  # noqa: A001 — domain term shadows builtin intentionally
+class FileNotFoundError(AttachmentNotFoundError):  # noqa: A001 — domain term shadows builtin intentionally
     """Raised when a file id doesn't exist OR isn't owned by the
-    caller. Controllers map both to 404 — we don't leak existence."""
+    caller. Controllers map both to 404 — we don't leak existence.
+    Subclasses the library's `AttachmentNotFoundError` so the
+    react_agent attachment system catches it natively."""
 
 
 class FileTooLargeError(Exception):
@@ -54,9 +67,12 @@ class FileTooLargeError(Exception):
         self.max_size = max_size
 
 
-class UnsupportedMimeTypeError(Exception):
+class UnsupportedMimeTypeError(UnsupportedContentError):
     """Raised when an upload's content-type isn't in the platform-wide
-    accept list. Controllers map to 415 (Unsupported Media Type)."""
+    accept list (controllers map to 415), AND by the document extractor
+    for MIMEs it can't read. Subclasses the library's
+    `UnsupportedContentError` so the react_agent attachment system
+    catches it natively."""
 
     def __init__(self, mime: str) -> None:
         super().__init__(f"unsupported file type: {mime!r}")

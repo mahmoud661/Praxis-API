@@ -1,6 +1,8 @@
 """
 `read_attachment` — LangChain `@tool` that materializes an uploaded
-file into the model's context.
+file into the model's context. Part of the react_agent library base:
+it depends only on the ports in `react_agent.ports`, never on host
+storage directly.
 
 Per-MIME dispatch:
 
@@ -8,27 +10,24 @@ Per-MIME dispatch:
     Small files come back whole; large files come back as a slice
     with a footer telling the model the next offset to request.
   - PDF → same pagination over the extracted text
-  - image (jpeg/png/webp/gif) → returns the LangChain multimodal
-    `content_block` shape so vision-capable models can "see" the image.
-    LangChain treats a tool that returns a content block correctly when
-    the agent's model is vision-capable; for text-only models the
-    string fallback below is used.
+  - image (jpeg/png/webp/gif) → returns the multimodal `content_block`
+    shape so vision-capable models can "see" the image.
+  - anything else (audio, video, archives, binaries) → a descriptive
+    note (name, type, size) instead of an error — the turn never breaks.
 
 Accepted `file_id` formats:
 
-  - raw UUID hex (32 chars, no dashes) — the durable file id
+  - raw UUID hex — the durable file id
   - model-facing alias `turn{N}{cat}{M}` — resolved against thread
-    history via `IContentReferenceLookup`. Lets the model say
-    `read_attachment("turn3image1")` instead of memorising a UUID it
-    saw three turns ago.
+    history via the `ReferenceLookup` port. Lets the model say
+    `read_attachment("turn3image1")` instead of memorising a UUID.
 
-Owner / thread ids come from the LangChain `RunnableConfig` that the
-agent's executor passes to every tool call. `RunManager` populates
+Owner / thread ids come from the LangChain `RunnableConfig` the
+executor passes to every tool call; the host seeds
 `config["configurable"]["owner_id"]` + `["thread_id"]` at run start.
 
-Constructed via `make_read_attachment_tool(files, extractor, lookup)`
-— the factory captures the injected services in the tool's closure
-so the agent doesn't have to know about DI.
+Constructed via `make_read_attachment_tool(store, extractor, lookup)`
+— the factory captures the injected ports in the tool's closure.
 """
 
 from __future__ import annotations
@@ -39,24 +38,28 @@ from typing import Annotated, Any
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
-from .....domain.IServices.i_files_service import IFilesService
-from .....domain.ports.content_reference_lookup import IContentReferenceLookup
-from .....domain.ports.document_extractor import IDocumentExtractor
-from ..._errors import FileNotFoundError, UnsupportedMimeTypeError
+from ..ports import (
+    AttachmentNotFoundError,
+    AttachmentStore,
+    ContentExtractor,
+    UnsupportedContentError,
+)
+from ..references import ATTACHMENT_CATEGORIES, ReferenceLookup
 
-
-# Regex matching the model-facing alias. The category set mirrors the
-# attachment categories declared in `content_reference_dto.py` — keep
-# this in sync if you add a new MIME bucket there.
-_ALIAS_RE = re.compile(r"^turn(\d+)(file|image|pdf|audio|video)(\d+)$")
+# Regex matching the model-facing alias. The category alternation is
+# built from `ATTACHMENT_CATEGORIES` (the grammar's single source of
+# truth in `react_agent.references`), so adding a new MIME bucket there
+# automatically teaches this tool to resolve its aliases.
+_ALIAS_CATEGORY_ALTS = "|".join(sorted(ATTACHMENT_CATEGORIES))
+_ALIAS_RE = re.compile(rf"^turn(\d+)({_ALIAS_CATEGORY_ALTS})(\d+)$")
 
 
 # ---- module constants --------------------------------------------------------
 
 # Default page size (chars) per call when the caller doesn't specify
 # one. A 100MB CSV would otherwise drop straight into the model
-# context. Production overrides this via `env.attachment_page_chars`
-# (tool calls) and `env.attachment_preview_chars` (preload injection).
+# context. Hosts override via `AttachmentConfig.page_chars` (tool
+# calls) and `AttachmentConfig.preview_chars` (preload injection).
 _DEFAULT_PAGE_CHARS = 20_000
 
 
@@ -65,14 +68,13 @@ _DEFAULT_PAGE_CHARS = 20_000
 
 def make_read_attachment_tool(
     *,
-    files: IFilesService,
-    extractor: IDocumentExtractor,
-    lookup: IContentReferenceLookup,
+    store: AttachmentStore,
+    extractor: ContentExtractor,
+    lookup: ReferenceLookup,
     page_chars: int = _DEFAULT_PAGE_CHARS,
 ) -> BaseTool:
-    """Build the tool with `files` + `extractor` + `lookup` captured
-    in its closure. `page_chars` caps how much text one call returns
-    (production passes `env.attachment_page_chars`). Returns the
+    """Build the tool with the host's ports captured in its closure.
+    `page_chars` caps how much text one call returns. Returns the
     BaseTool ready to bind into the agent's `tools=[...]` list."""
 
     @tool
@@ -117,7 +119,7 @@ def make_read_attachment_tool(
                 "attachment in this conversation."
             )
         return await materialize_attachment(
-            files=files,
+            store=store,
             extractor=extractor,
             file_id=resolved_id,
             owner_id=owner_id,
@@ -133,15 +135,15 @@ async def _resolve_alias(
     raw: str,
     config: RunnableConfig | None,
     owner_id: str,
-    lookup: IContentReferenceLookup,
+    lookup: ReferenceLookup,
 ) -> str | None:
     """If `raw` looks like `turnNcatM`, resolve via the lookup. Else
-    treat as a raw file id (UUID hex or otherwise — `FilesService`
-    handles validation). Returns the canonical file_id or None when
-    the alias points at nothing."""
+    treat as a raw file id (the store will reject an unknown one).
+    Returns the canonical file_id or None when the alias points at
+    nothing."""
     match = _ALIAS_RE.match(raw)
     if not match:
-        return raw  # raw UUID path; FilesService will 404 if wrong
+        return raw  # raw UUID path; the store 404s if wrong
     turn_index = int(match.group(1))
     category = match.group(2)
     item_index = int(match.group(3))  # 1-indexed; lookup converts internally
@@ -168,8 +170,8 @@ def _thread_id_from_config(config: RunnableConfig | None) -> str | None:
 
 async def materialize_attachment(
     *,
-    files: IFilesService,
-    extractor: IDocumentExtractor,
+    store: AttachmentStore,
+    extractor: ContentExtractor,
     file_id: str,
     owner_id: str,
     offset: int = 0,
@@ -191,29 +193,29 @@ async def materialize_attachment(
     pagination, and error formatting.
     """
     try:
-        file = await files.get(file_id=file_id, owner_id=owner_id)
-        data = await files.read_bytes(file_id=file_id, owner_id=owner_id)
-    except FileNotFoundError:
+        file = await store.get(file_id=file_id, owner_id=owner_id)
+        data = await store.read_bytes(file_id=file_id, owner_id=owner_id)
+    except AttachmentNotFoundError:
         return f"[tool error] file {file_id!r} not found."
 
-    # Images → multimodal content block (LangChain feeds this to the
-    # model as a vision-capable input).
+    # Images → multimodal content block (the chat client feeds this to
+    # the model as a vision-capable input).
     if file.mime_type.startswith("image/"):
         try:
             block = extractor.to_image_block(
                 data=data, mime_type=file.mime_type
             )
-        except UnsupportedMimeTypeError:
+        except UnsupportedContentError:
             return (
                 f"[tool error] image MIME {file.mime_type!r} not "
                 "renderable as a content block."
             )
         return [block]
 
-    # Text-bearing files → extract + maybe truncate.
+    # Text-bearing files → extract + paginate.
     try:
         text = extractor.extract_text(data=data, mime_type=file.mime_type)
-    except UnsupportedMimeTypeError:
+    except UnsupportedContentError:
         # Not an error — audio, video, archives, binaries… anything the
         # extractor can't turn into text. The turn must not break and
         # the model should still know the file EXISTS (name, type,

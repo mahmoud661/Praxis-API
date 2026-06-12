@@ -29,8 +29,8 @@ from langchain_core.messages import HumanMessage
 from ....application.services._errors import FileNotFoundError
 from ....domain.IServices.i_files_service import IFilesService
 from ....domain.ports.logger import Logger
+from .agent_registry import AgentRegistry
 from .event_normalizer import normalize_event
-from .main_agent import MainAgent
 
 OnEvent = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -38,16 +38,20 @@ OnEvent = Callable[[dict[str, Any]], Awaitable[None]]
 class AgentRunner:
     def __init__(
         self,
-        main_agent: MainAgent,
+        agent_registry: AgentRegistry,
         files: IFilesService,
         logger: Logger,
     ) -> None:
-        # Container resolves `main_agent: MainAgent` from token "MainAgent".
+        # The runner's only entry into the agentic stack is through an
+        # AGENT resolved from the registry — it never imports or calls
+        # the react_agent runtime itself (that's the agent's job, in
+        # its graph.py). Today every thread runs the default agent;
+        # per-thread `agent_id` plugs in here later.
         # `files` is needed to snapshot attachment metadata onto the
         # persisted HumanMessage so the frontend can render the chips
         # after a reload (file might be deleted later — the snapshot
         # still tells the UI "this was attached: report.pdf").
-        self._main_agent = main_agent
+        self._registry = agent_registry
         self._files = files
         self._logger = logger
 
@@ -71,7 +75,7 @@ class AgentRunner:
         picks them up and synthesizes a fake `read_attachment` tool call
         per id so the model sees the file content as if it had fetched it.
         """
-        graph = self._main_agent.get()
+        graph = self._registry.default_agent().get()
         attachment_ids = list(attachments or [])
         config = {
             "configurable": {

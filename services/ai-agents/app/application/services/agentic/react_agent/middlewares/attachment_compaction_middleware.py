@@ -2,7 +2,10 @@
 AttachmentCompactionMiddleware — strips attachment bytes out of old
 messages before each model call, replacing them with self-describing
 stubs. The model can re-fetch full bytes any time via the
-`read_attachment` tool — same id, persistent on disk.
+`read_attachment` tool — same id, persistent in the host's store.
+
+Part of the react_agent library base: all environmental access goes
+through the ports in `react_agent.ports` — no host imports.
 
 Why this exists: every model call replays the WHOLE message history.
 A user-attached image carries ~1500 input tokens. After 5 turns
@@ -10,31 +13,31 @@ that's 7,500 tokens per turn, all for the SAME image. After 20 turns
 the model is mostly paying for replayed bytes. This middleware caps
 that growth — old attachments compress to ~30 tokens each (the stub).
 
-Eviction is governed by `attachment_compaction_keep_turns` from env:
-attachments in the LAST N user turns stay intact; everything older
-gets the stub treatment. Stubs are idempotent (marked so the
-middleware doesn't re-compact what it already compacted).
+Eviction is governed by `AttachmentConfig.keep_turns`: attachments in
+the LAST N user turns stay intact; everything older gets the stub
+treatment. Stubs are idempotent (marked so the middleware doesn't
+re-compact what it already compacted). The CURRENT turn is always
+preserved, even at keep_turns=0 — its attachments were injected THIS
+turn by the preload middleware.
 
 Captions:
-  First time a file is evicted, we ask the LLM for a one-sentence
-  description ("login form screenshot showing two input fields") and
-  persist it on the file's metadata via `FilesService.set_caption`.
-  Subsequent evictions just look up the cached caption — caption
-  generation is paid at most once per file, regardless of how many
-  threads/turns it appears in.
+  First time a file is evicted, we ask the captioner port for a
+  one-sentence description and persist it via
+  `AttachmentStore.set_caption`. Subsequent evictions reuse the cached
+  caption — generation is paid at most once per file.
 
 Stub shape:
   - with caption: `[Attachment cleared — was: <caption>. Re-fetch via
     read_attachment({file_id}).]`
-  - fallback (caption gen failed or skipped): `[Attachment cleared —
-    was a <mime> file '<filename>'. Re-fetch via read_attachment({file_id}).]`
+  - fallback: `[Attachment cleared — was a <mime> file '<filename>'.
+    Re-fetch via read_attachment({file_id}).]`
 
 Where the eviction lands:
-  - Synthetic ToolMessage from `AttachmentPreloadMiddleware` (text
-    attachments): `content` replaced with stub string.
-  - Image content blocks inside a HumanMessage (`{type: "image_url",
-    image_url: {...}}`): each block replaced with a `{type: "text",
-    text: <stub>}` block.
+  - read_attachment ToolMessages — synthetic preload pairs AND organic
+    calls the model made (paginated pages included): `content`
+    replaced with the stub string.
+  - Image content blocks inside a HumanMessage: each block replaced
+    with a `{type: "text", text: <stub>}` block.
 
 Both paths leave the message structure intact — only the bytes-heavy
 content changes shape.
@@ -46,21 +49,22 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.types import Overwrite
 
-from ...._errors import FileNotFoundError as FileNotFoundDomainError
-from ..._attachment_caption import generate_attachment_caption
+from ..captioning import generate_attachment_caption
+from ..ports import (
+    AttachmentConfig,
+    AttachmentNotFoundError,
+    AttachmentStore,
+    CaptionModel,
+    ContentExtractor,
+    LoggerLike,
+)
 
 if TYPE_CHECKING:
-
     from langgraph.runtime import Runtime
-
-    from ......domain.IServices.i_files_service import IFilesService
-    from ......domain.ports.document_extractor import IDocumentExtractor
-    from ......domain.ports.logger import Logger
-    from ......infrastructure.config.env import Env
 
 _log = logging.getLogger(__name__)
 
@@ -79,25 +83,26 @@ class AttachmentCompactionMiddleware(AgentMiddleware):
     history. Runs on every model call but is idempotent — already-
     compacted messages are skipped.
 
-    Constructor takes everything the caption generator needs (files
-    service, extractor, env, logger). The compaction itself is pure
-    walking + rewriting; the only async work is the LLM call to
-    generate a fresh caption on first eviction of a file.
+    Constructor takes the storage/extraction/captioning ports. The
+    compaction itself is pure walking + rewriting; the only async work
+    is the captioner call on first eviction of a file.
     """
 
     def __init__(
         self,
-        files: "IFilesService",
-        extractor: "IDocumentExtractor",
-        env: "Env",
-        logger: "Logger",
+        *,
+        store: AttachmentStore,
+        extractor: ContentExtractor,
+        captioner: CaptionModel,
+        config: AttachmentConfig,
+        logger: LoggerLike,
     ) -> None:
         super().__init__()
-        self._files = files
+        self._store = store
         self._extractor = extractor
-        self._env = env
+        self._captioner = captioner
         self._logger = logger
-        self._keep_turns = env.attachment_compaction_keep_turns
+        self._keep_turns = config.keep_turns
 
     async def abefore_model(
         self,
@@ -118,13 +123,21 @@ class AttachmentCompactionMiddleware(AgentMiddleware):
         if cutoff <= 0:
             return None  # not enough history to evict yet
 
+        # Map every read_attachment tool call's id → file_id from the
+        # AIMessages. Synthetic preload calls stamp the id on the
+        # ToolMessage too, but ORGANIC calls (the model paging a file
+        # via read_attachment) only carry it here, on the paired tool
+        # call's args. Without this, those pages never compact and
+        # replay forever — the exact bloat this middleware exists to cap.
+        tool_file_ids = _tool_call_file_ids(messages)
+
         changed = False
         for idx in range(cutoff):
             msg = messages[idx]
             if _is_compacted(msg):
                 continue
             replaced = await self._maybe_compact_message(
-                msg, owner_id=owner_id
+                msg, owner_id=owner_id, tool_file_ids=tool_file_ids
             )
             if replaced is not None:
                 messages[idx] = replaced
@@ -152,26 +165,36 @@ class AttachmentCompactionMiddleware(AgentMiddleware):
     # ----- compaction internals ------------------------------------------
 
     async def _maybe_compact_message(
-        self, msg: Any, *, owner_id: str | None
+        self,
+        msg: Any,
+        *,
+        owner_id: str | None,
+        tool_file_ids: dict[str, str],
     ) -> Any | None:
         """Return a rewritten message, or None if this message has
         nothing to compact. Walks two paths:
 
-          - ToolMessage from the preload (name=read_attachment) →
-            replace `content` with a stub string.
+          - ToolMessage from read_attachment (synthetic preload OR an
+            organic model call) → replace `content` with a stub string.
           - HumanMessage with image content blocks → replace each
             image block with a text stub block.
         """
         if isinstance(msg, ToolMessage) and msg.name == "read_attachment":
-            return await self._compact_tool_message(msg, owner_id=owner_id)
+            return await self._compact_tool_message(
+                msg, owner_id=owner_id, tool_file_ids=tool_file_ids
+            )
         if isinstance(msg, HumanMessage) and isinstance(msg.content, list):
             return await self._compact_human_message(msg, owner_id=owner_id)
         return None
 
     async def _compact_tool_message(
-        self, msg: ToolMessage, *, owner_id: str | None
+        self,
+        msg: ToolMessage,
+        *,
+        owner_id: str | None,
+        tool_file_ids: dict[str, str],
     ) -> ToolMessage | None:
-        file_id = _tool_call_file_id_from_history(msg)
+        file_id = _tool_call_file_id_from_history(msg, tool_file_ids)
         stub = await self._stub_for_file(
             file_id=file_id, owner_id=owner_id
         )
@@ -192,7 +215,7 @@ class AttachmentCompactionMiddleware(AgentMiddleware):
     ) -> HumanMessage | None:
         """Walk the content list, swap image blocks for text stubs.
         File ids come from `msg.additional_kwargs.attachments` (the
-        snapshot AgentRunner stashed at send time)."""
+        snapshot the host's runner stashed at send time)."""
         attachments_meta = _attachment_snapshots(msg)
         if not attachments_meta:
             return None
@@ -263,10 +286,10 @@ class AttachmentCompactionMiddleware(AgentMiddleware):
 
         caption: str | None = None
         try:
-            view = await self._files.get(
+            view = await self._store.get(
                 file_id=file_id, owner_id=owner_id
             )
-        except FileNotFoundDomainError:
+        except AttachmentNotFoundError:
             view = None
 
         if view is not None:
@@ -287,16 +310,16 @@ class AttachmentCompactionMiddleware(AgentMiddleware):
         self, *, file_id: str, owner_id: str
     ) -> str | None:
         caption = await generate_attachment_caption(
-            files=self._files,
+            store=self._store,
             extractor=self._extractor,
-            env=self._env,
+            captioner=self._captioner,
             logger=self._logger,
             file_id=file_id,
             owner_id=owner_id,
         )
         if caption:
             try:
-                await self._files.set_caption(
+                await self._store.set_caption(
                     file_id=file_id,
                     owner_id=owner_id,
                     caption=caption,
@@ -331,16 +354,24 @@ def _is_compacted(msg: Any) -> bool:
 
 
 def _cutoff_index(messages: list, *, keep: int) -> int:
-    """Index of the (keep)-th most recent HumanMessage. Returns 0 if
-    the thread has `keep` or fewer user turns (i.e. nothing to evict)."""
-    if keep <= 0:
-        return len(messages)  # evict everything
+    """Index of the (keep)-th most recent HumanMessage. Everything
+    before it is fair game for compaction; it and everything after stay
+    full-fidelity. Returns 0 when there's nothing older to evict.
+
+    The CURRENT (most recent) user turn is ALWAYS preserved, even at
+    keep=0 — its attachments were injected THIS turn by the preload
+    middleware, so evicting them before the first model call would
+    blind the model to its own input. `keep=0` therefore means "evict
+    everything older than the current turn", not "evict everything"."""
     human_indices = [
         i for i, m in enumerate(messages) if isinstance(m, HumanMessage)
     ]
-    if len(human_indices) <= keep:
+    if not human_indices:
         return 0
-    return human_indices[-keep]
+    effective_keep = max(keep, 1)
+    if len(human_indices) <= effective_keep:
+        return 0
+    return human_indices[-effective_keep]
 
 
 def _owner_id_from_config() -> str | None:
@@ -354,29 +385,58 @@ def _owner_id_from_config() -> str | None:
     return owner_id if isinstance(owner_id, str) else None
 
 
-def _tool_call_file_id_from_history(msg: ToolMessage) -> str | None:
-    """Synthetic preload tool calls were created with
-    `args={"file_id": <id>}` on the AIMessage's tool_calls entry.
-    The ToolMessage itself doesn't carry that — but its
-    `tool_call_id` matches a tool_call somewhere upstream.
+def _tool_call_file_ids(messages: list) -> dict[str, str]:
+    """Build a `tool_call_id → file_id` map from every read_attachment
+    tool call across the AIMessages. Covers BOTH synthetic preload
+    calls and organic ones the model issued (paging a file via
+    `read_attachment({file_id, offset})`)."""
+    out: dict[str, str] = {}
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+        for call in msg.tool_calls or []:
+            if isinstance(call, dict):
+                cid = call.get("id")
+                name = call.get("name")
+                args = call.get("args")
+            else:
+                cid = getattr(call, "id", None)
+                name = getattr(call, "name", None)
+                args = getattr(call, "args", None)
+            if name != "read_attachment" or not isinstance(cid, str):
+                continue
+            file_id = args.get("file_id") if isinstance(args, dict) else None
+            if isinstance(file_id, str) and file_id:
+                out[cid] = file_id
+    return out
 
-    For compaction we don't need to walk backwards to recover the
-    args; the file id is on the tool call's PAIRED AIMessage. But
-    we'd have to scan upstream messages. As a simpler path:
-    `AttachmentPreloadMiddleware` stamps the file id on
-    `additional_kwargs["file_id"]` of the synthetic ToolMessage —
-    see the preload code."""
+
+def _tool_call_file_id_from_history(
+    msg: ToolMessage, tool_file_ids: dict[str, str]
+) -> str | None:
+    """Recover the file id behind a read_attachment ToolMessage.
+
+    Two sources, in order: the file id `AttachmentPreloadMiddleware`
+    stamps on `additional_kwargs["file_id"]` of its SYNTHETIC tool
+    messages, then — for ORGANIC calls the model made — the
+    `tool_call_id → file_id` map built from the paired AIMessage's
+    tool-call args. Without the second source, model-initiated reads
+    (including paginated pages) would never compact."""
     extras = getattr(msg, "additional_kwargs", None) or {}
     file_id = extras.get("file_id")
-    return file_id if isinstance(file_id, str) else None
+    if isinstance(file_id, str) and file_id:
+        return file_id
+    cid = getattr(msg, "tool_call_id", None)
+    if isinstance(cid, str):
+        return tool_file_ids.get(cid)
+    return None
 
 
 def _attachment_snapshots(msg: HumanMessage) -> list[dict[str, Any]]:
     """Pull the attachments-metadata snapshot from the message's
-    additional_kwargs (the same one AgentRunner stashes for the
-    frontend chip rendering). Image-MIME entries land in compaction;
-    everything else is ignored here (text attachments took the
-    ToolMessage path)."""
+    additional_kwargs (stamped by the host's runner; also used for UI
+    chip rendering). Image-MIME entries land in compaction; everything
+    else is ignored here (text attachments took the ToolMessage path)."""
     extras = getattr(msg, "additional_kwargs", None) or {}
     raw = extras.get("attachments") if isinstance(extras, dict) else None
     if not isinstance(raw, list):

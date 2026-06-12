@@ -11,8 +11,8 @@ from dataclasses import dataclass
 import pytest
 
 from app.application.services._errors import FileNotFoundError
-from app.application.services.agentic.tools.kb_search import make_kb_search_tool
-from app.application.services.agentic.tools.read_attachment import (
+from app.application.services.agentic.agents.general.tools.kb_search import make_kb_search_tool
+from app.application.services.agentic.react_agent.tools.read_attachment import (
     make_read_attachment_tool,
 )
 from app.domain.dtos.content_reference_dto import AttachmentRef, WebpageRef
@@ -101,13 +101,28 @@ class _FakeContentReferenceLookup:
         return None
 
 
+@dataclass
+class _StoreItem:
+    """Mirrors the `.value` accessor of a langgraph store item."""
+
+    value: dict
+
+
 class _FakeAgenticStore:
-    """Minimal AgenticStore stand-in — kb_search calls `store.aput`;
-    tests don't inspect what's written."""
+    """Dict-backed AgenticStore stand-in. kb_search reads+writes a
+    per-thread search counter and stashes hits via `store.aget`/`aput`;
+    a real round-trip lets tests assert the citation sequence."""
 
     class _Store:
-        async def aput(self, *_args: object, **_kwargs: object) -> None:
-            return None
+        def __init__(self) -> None:
+            self.data: dict[tuple, dict] = {}
+
+        async def aput(self, namespace, key, value) -> None:
+            self.data[(tuple(namespace), key)] = value
+
+        async def aget(self, namespace, key):
+            value = self.data.get((tuple(namespace), key))
+            return _StoreItem(value=value) if value is not None else None
 
     def __init__(self) -> None:
         self.store = _FakeAgenticStore._Store()
@@ -117,10 +132,13 @@ _LOOKUP = _FakeContentReferenceLookup()
 _AGENTIC_STORE = _FakeAgenticStore()
 
 
-def _config(owner_id: str | None = "user-A") -> dict:
-    if owner_id is None:
-        return {"configurable": {}}
-    return {"configurable": {"owner_id": owner_id}}
+def _config(owner_id: str | None = "user-A", thread_id: str | None = None) -> dict:
+    configurable: dict = {}
+    if owner_id is not None:
+        configurable["owner_id"] = owner_id
+    if thread_id is not None:
+        configurable["thread_id"] = thread_id
+    return {"configurable": configurable}
 
 
 # ----- read_attachment --------------------------------------------------------
@@ -138,7 +156,7 @@ class TestReadAttachment:
             data=b"hello world",
         )
         tool = make_read_attachment_tool(
-            files=files, extractor=DocumentExtractor(), lookup=_LOOKUP
+            store=files, extractor=DocumentExtractor(), lookup=_LOOKUP
         )
         out = await tool.ainvoke({"file_id": "f1"}, config=_config())
         assert out == "hello world"
@@ -155,7 +173,7 @@ class TestReadAttachment:
             data=raw,
         )
         tool = make_read_attachment_tool(
-            files=files, extractor=DocumentExtractor(), lookup=_LOOKUP
+            store=files, extractor=DocumentExtractor(), lookup=_LOOKUP
         )
         out = await tool.ainvoke({"file_id": "img1"}, config=_config())
         assert isinstance(out, list)
@@ -166,7 +184,7 @@ class TestReadAttachment:
     async def test_unknown_file_returns_tool_error(self) -> None:
         files = _FakeFilesService()
         tool = make_read_attachment_tool(
-            files=files, extractor=DocumentExtractor(), lookup=_LOOKUP
+            store=files, extractor=DocumentExtractor(), lookup=_LOOKUP
         )
         out = await tool.ainvoke(
             {"file_id": "missing"}, config=_config()
@@ -178,7 +196,7 @@ class TestReadAttachment:
     async def test_missing_owner_id_returns_tool_error(self) -> None:
         files = _FakeFilesService()
         tool = make_read_attachment_tool(
-            files=files, extractor=DocumentExtractor(), lookup=_LOOKUP
+            store=files, extractor=DocumentExtractor(), lookup=_LOOKUP
         )
         out = await tool.ainvoke(
             {"file_id": "anything"}, config=_config(owner_id=None)
@@ -201,7 +219,7 @@ class TestReadAttachment:
             data=b"confidential",
         )
         tool = make_read_attachment_tool(
-            files=files, extractor=DocumentExtractor(), lookup=_LOOKUP
+            store=files, extractor=DocumentExtractor(), lookup=_LOOKUP
         )
         out = await tool.ainvoke(
             {"file_id": "secret"}, config=_config(owner_id="user-B")
@@ -230,7 +248,7 @@ class TestReadAttachment:
             data=buf.getvalue(),
         )
         tool = make_read_attachment_tool(
-            files=files, extractor=DocumentExtractor(), lookup=_LOOKUP
+            store=files, extractor=DocumentExtractor(), lookup=_LOOKUP
         )
         out = await tool.ainvoke({"file_id": "scan"}, config=_config())
         assert "[tool note]" in out
@@ -249,7 +267,7 @@ class TestReadAttachment:
             data=b"...",
         )
         tool = make_read_attachment_tool(
-            files=files, extractor=DocumentExtractor(), lookup=_LOOKUP
+            store=files, extractor=DocumentExtractor(), lookup=_LOOKUP
         )
         out = await tool.ainvoke({"file_id": "weird"}, config=_config())
         assert "[tool error]" not in out
@@ -302,8 +320,10 @@ class TestKbSearch:
             _hit(text="Apples are red.", filename="fruit.md", idx=0),
             _hit(text="Oranges are tangy.", filename="fruit.md", idx=1),
         ]
+        # Fresh store so the per-thread search counter starts at 0
+        # regardless of test ordering.
         tool = make_kb_search_tool(
-            knowledge_service=ks, agentic_store=_AGENTIC_STORE
+            knowledge_service=ks, agentic_store=_FakeAgenticStore()
         )
         out = await tool.ainvoke(
             {
@@ -312,7 +332,7 @@ class TestKbSearch:
                 "id": "test-call-1",
                 "type": "tool_call",
             },
-            config=_config(),
+            config=_config(thread_id="t-cite"),
         )
         # Each hit numbered, with filename + body + alias.
         # When invoked with a full tool_call dict, ainvoke returns a
@@ -320,11 +340,37 @@ class TestKbSearch:
         text = out.content if hasattr(out, "content") else out
         assert "[1] fruit.md" in text
         assert "Apples are red." in text
-        # 1-indexed citation aliases (matches ChatGPT's convention and
-        # what `read_attachment(turn{N}image{M})` accepts).
+        # First kb_search call in the thread → seq 0. 1-indexed items
+        # (matches ChatGPT's convention and what
+        # `read_attachment(turn{N}image{M})` accepts).
         assert "citeturn0search1" in text
         assert "[2] fruit.md" in text
         assert "citeturn0search2" in text
+
+    @pytest.mark.asyncio
+    async def test_second_kb_search_call_increments_the_sequence(self) -> None:
+        # Two kb_search calls in the same thread must NOT collide on
+        # turn0 — the second call's citations carry turn1 so the lookup
+        # resolves each against the call that produced it.
+        ks = _FakeKnowledgeService()
+        ks.hits = [_hit(text="First.", filename="a.md", idx=0)]
+        store = _FakeAgenticStore()
+        tool = make_kb_search_tool(knowledge_service=ks, agentic_store=store)
+
+        out1 = await tool.ainvoke(
+            {"name": "kb_search", "args": {"query": "a"}, "id": "c1",
+             "type": "tool_call"},
+            config=_config(thread_id="t-multi"),
+        )
+        out2 = await tool.ainvoke(
+            {"name": "kb_search", "args": {"query": "b"}, "id": "c2",
+             "type": "tool_call"},
+            config=_config(thread_id="t-multi"),
+        )
+        t1 = out1.content if hasattr(out1, "content") else out1
+        t2 = out2.content if hasattr(out2, "content") else out2
+        assert "citeturn0search1" in t1
+        assert "citeturn1search1" in t2
 
     @pytest.mark.asyncio
     async def test_empty_query_returns_tool_error_without_calling_service(

@@ -38,14 +38,14 @@ def test_discover_finds_every_base_agent_subclass():
     registry = _make_registry()
     registry.discover()
     ids = {s.id for s in registry.specs()}
-    assert ids == {"alpha", "bravo"}
+    assert ids == {"alpha", "bravo", "charlie"}  # charlie = package layout
 
 
 def test_discover_is_idempotent():
     registry = _make_registry()
     registry.discover()
     registry.discover()  # second call no-ops
-    assert len(registry.specs()) == 2
+    assert len(registry.specs()) == 3
 
 
 def test_default_id_prefers_general_else_lex_first():

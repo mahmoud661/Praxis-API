@@ -29,7 +29,6 @@ from typing import Any, Callable, get_type_hints
 from redis.asyncio import Redis
 
 from ...application.services.agentic.agent_registry import AgentRegistry
-from ...application.services.agentic.main_agent import MainAgent
 from ...application.services.agentic.run_manager import RunManager
 from ...application.services.agentic.runner import AgentRunner
 from ...domain.ports.event_consumer import EventConsumer
@@ -228,13 +227,12 @@ def register_dependencies() -> Container:
     )
     container.register("AgentRegistry", registry)
 
-    # MainAgent is now a thin proxy over the registry's default agent —
-    # all real graph wiring lives in BaseAgent subclasses. Registered
-    # AFTER the registry so its constructor can take the registry as a
-    # dependency. Graph compilation stays lazy: the proxy's `get()`
-    # resolves the default agent at call time, by which point
-    # `discover()` has run.
-    container.register("MainAgent", MainAgent(registry))
+    # Attachment captioner — the app's implementation of the react_agent
+    # library's CaptionModel port (LiteLLM-backed). Agents resolve it by
+    # class-name annotation, so it must exist before registry.discover().
+    from ...infrastructure.llm.attachment_captioner import AttachmentCaptioner
+
+    container.register("AttachmentCaptioner", AttachmentCaptioner(env, logger))
 
     # File storage backend — picked by env var. Local is the default
     # and matches our single-pod compose layout; S3 is interface-only
@@ -294,12 +292,14 @@ def register_dependencies() -> Container:
     )
 
     # AgentRunner: streams events from the LangGraph graph through an opaque
-    # `on_event` callback. The RunManager wires that callback to the
-    # EventStream so a WebSocket disconnect doesn't kill the run.
+    # `on_event` callback. Resolves the agent to execute via the registry
+    # (default agent today; per-thread agent_id later) — it never touches
+    # the react_agent runtime directly. The RunManager wires `on_event` to
+    # the EventStream so a WebSocket disconnect doesn't kill the run.
     container.register(
         "AgentRunner",
         AgentRunner(
-            container.resolve("MainAgent"),
+            registry,
             container.resolve("IFilesService"),
             logger,
         ),

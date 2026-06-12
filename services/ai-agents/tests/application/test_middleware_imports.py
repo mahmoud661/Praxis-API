@@ -21,6 +21,17 @@ _MIDDLEWARE_MODULES = [
     "app.application.services.agentic.react_agent.middlewares.compaction_middleware",
     "app.application.services.agentic.react_agent.middlewares.content_reference_middleware",
     "app.application.services.agentic.react_agent.middlewares.prompt_caching_middleware",
+    # Library base modules + the per-agent assembly seams — same
+    # lazy-import failure mode, same build-time gate.
+    "app.application.services.agentic.react_agent.ports",
+    "app.application.services.agentic.react_agent.references",
+    "app.application.services.agentic.react_agent.captioning",
+    "app.application.services.agentic.react_agent.tools.read_attachment",
+    "app.application.services.agentic.agents.general.agent",
+    "app.application.services.agentic.agents.general.graph",
+    "app.application.services.agentic.agents.general.prompts",
+    "app.application.services.agentic.agents.general.sections",
+    "app.application.services.agentic.agents.general.tools.kb_search",
 ]
 
 

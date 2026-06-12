@@ -15,9 +15,9 @@ Subclassing contract:
           ...
 
 Graph compilation is lazy: subclasses implement `_build()`, and the base
-class caches the result on first `get()`. This matches `MainAgent`'s
-existing pattern — graphs depend on `AgenticStore.init()` having run,
-which only happens during the FastAPI lifespan.
+class caches the result on first `get()` — graphs depend on
+`AgenticStore.init()` having run, which only happens during the FastAPI
+lifespan.
 
 The agent registry discovers `BaseAgent` subclasses by scanning the
 `agents/` folder; it does NOT touch `_build()` (only reads `spec`).
@@ -60,8 +60,7 @@ class BaseAgent(ABC):
 
     def get(self) -> "CompiledStateGraph":
         """Return the compiled graph, building on first call. Callers
-        should only invoke this AFTER `AgenticStore.init()` has run —
-        same constraint MainAgent had."""
+        should only invoke this AFTER `AgenticStore.init()` has run."""
         if self._graph is None:
             self._graph = self._build()
         return self._graph  # type: ignore[return-value]

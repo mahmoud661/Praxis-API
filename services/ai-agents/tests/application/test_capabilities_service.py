@@ -72,7 +72,7 @@ async def test_list_returns_every_agent_in_registry():
     svc, _ = _service()
     view = await svc.list_capabilities(user_id="u1")
     ids = [a.id for a in view.agents]
-    assert set(ids) == {"alpha", "bravo"}
+    assert set(ids) == {"alpha", "bravo", "charlie"}  # charlie = package layout
 
 
 @pytest.mark.asyncio

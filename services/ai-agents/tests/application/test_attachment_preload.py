@@ -24,7 +24,7 @@ from dataclasses import dataclass
 import pytest
 
 from app.application.services._errors import FileNotFoundError
-from app.application.services.agentic.tools.read_attachment import (
+from app.application.services.agentic.react_agent.tools.read_attachment import (
     materialize_attachment,
 )
 from app.domain.dtos.file_dto import FileView
@@ -98,7 +98,7 @@ class TestMaterializeAttachment:
             data=b"hello world",
         )
         out = await materialize_attachment(
-            files=files,
+            store=files,
             extractor=DocumentExtractor(),
             file_id="f1",
             owner_id="u1",
@@ -116,7 +116,7 @@ class TestMaterializeAttachment:
             data=b"\x89PNG\r\n\x1a\nHELLO",
         )
         out = await materialize_attachment(
-            files=files,
+            store=files,
             extractor=DocumentExtractor(),
             file_id="img1",
             owner_id="u1",
@@ -128,7 +128,7 @@ class TestMaterializeAttachment:
     @pytest.mark.asyncio
     async def test_missing_file_returns_tool_error(self) -> None:
         out = await materialize_attachment(
-            files=_FakeFilesService(),
+            store=_FakeFilesService(),
             extractor=DocumentExtractor(),
             file_id="ghost",
             owner_id="u1",
@@ -148,7 +148,7 @@ class TestMaterializeAttachment:
             data=b"confidential",
         )
         out = await materialize_attachment(
-            files=files,
+            store=files,
             extractor=DocumentExtractor(),
             file_id="secret",
             owner_id="u2",
@@ -167,7 +167,7 @@ class TestMaterializeAttachment:
             data=b"x" * 100,
         )
         out = await materialize_attachment(
-            files=files,
+            store=files,
             extractor=DocumentExtractor(),
             file_id="big",
             owner_id="u1",
@@ -190,7 +190,7 @@ class TestMaterializeAttachment:
             data=b"x" * 100,
         )
         out = await materialize_attachment(
-            files=files,
+            store=files,
             extractor=DocumentExtractor(),
             file_id="big",
             owner_id="u1",
@@ -212,7 +212,7 @@ class TestMaterializeAttachment:
             data=b"hello",
         )
         out = await materialize_attachment(
-            files=files,
+            store=files,
             extractor=DocumentExtractor(),
             file_id="small",
             owner_id="u1",
@@ -235,7 +235,7 @@ class TestMaterializeAttachment:
             data=b"...",
         )
         out = await materialize_attachment(
-            files=files,
+            store=files,
             extractor=DocumentExtractor(),
             file_id="weird",
             owner_id="u1",

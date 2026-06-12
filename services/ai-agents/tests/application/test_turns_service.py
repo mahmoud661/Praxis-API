@@ -56,12 +56,23 @@ class _FakeGraph:
         self.removed.extend(update.get("messages") or [])
 
 
-class _FakeMainAgent:
+class _FakeAgent:
     def __init__(self, graph: _FakeGraph) -> None:
         self._graph = graph
 
     def get(self) -> _FakeGraph:
         return self._graph
+
+
+class _FakeRegistry:
+    """Stands in for AgentRegistry — TurnsService only calls
+    `default_agent().get()`."""
+
+    def __init__(self, graph: _FakeGraph) -> None:
+        self._agent = _FakeAgent(graph)
+
+    def default_agent(self) -> _FakeAgent:
+        return self._agent
 
 
 @dataclass
@@ -113,7 +124,7 @@ def _service(
     run_manager = _FakeRunManager()
     service = TurnsService(
         thread_repo=_FakeThreadRepo(owner_id),
-        main_agent=_FakeMainAgent(graph),
+        agent_registry=_FakeRegistry(graph),
         run_manager=run_manager,
         logger=_NullLogger(),
     )

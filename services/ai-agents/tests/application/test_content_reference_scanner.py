@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import pytest
 
-from app.application.services.agentic.content_references import resolve, scan
+from app.application.services.agentic.react_agent.references import (
+    resolve,
+    scan,
+)
 from app.domain.dtos.content_reference_dto import (
     AttachmentRef,
     AttachmentReference,

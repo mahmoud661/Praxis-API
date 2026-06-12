@@ -1,33 +1,45 @@
 """
 `kb_search` — LangChain `@tool` for retrieving relevant chunks from
-the user's knowledge base.
+the user's knowledge base. General-agent specific: it's wired to this
+app's `IKnowledgeService` (Qdrant) and the agentic k/v store, so it
+lives in the agent's own tools folder, not in the react_agent library.
 
-Returns a model-readable summary of the top-k hits with `[turn0search{n}]`
-citation aliases at the end of each chunk. The content-reference
-middleware picks those aliases up post-emission and the frontend
-renders them as citation pills (same machinery as ChatGPT's
-`citeturn0search2` pattern).
+Returns a model-readable summary of the top-k hits with
+`citeturn{seq}search{n}` citation aliases at the end of each chunk —
+`seq` is this call's per-thread sequence number so citations from
+different kb_search calls never collide. The content-reference
+middleware picks the aliases up post-emission and the frontend renders
+them as citation pills.
 
 `owner_id` comes from the LangChain `RunnableConfig` so search results
 can never cross users. `KnowledgeService.search` enforces the same
 filter at the vector-store layer; this is defense in depth.
 
-Constructed via `make_kb_search_tool(knowledge_service)`. Capturing
-the service in the tool's closure avoids any DI plumbing leaking into
-the agent's tool list.
+Constructed via `make_kb_search_tool(...)`. Capturing the services in
+the tool's closure avoids any DI plumbing leaking into the agent's
+tool list.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import BaseTool, InjectedToolCallId, tool
+from langchain_core.tools import BaseTool, tool
 
-from .....domain.IServices.i_knowledge_service import IKnowledgeService
-from .....infrastructure.agentic.agentic_store import AgenticStore
+from .......domain.IServices.i_knowledge_service import IKnowledgeService
+from ....kb_citation_store import (
+    KB_HITS_NAMESPACE,
+    kb_count_key,
+    kb_hits_key,
+)
 
+if TYPE_CHECKING:
+    # Annotation-only: AgenticStore pulls langgraph.checkpoint.postgres,
+    # which isn't installed in every dev env. The factory isn't
+    # DI-constructed, so a lazy annotation costs nothing.
+    from .......infrastructure.agentic.agentic_store import AgenticStore
 
 # ---- module constants --------------------------------------------------------
 
@@ -37,13 +49,6 @@ _DEFAULT_K = 5
 # granularity but a long chunk can still be ~1500 chars.
 _HIT_PREVIEW_CHARS = 1200
 
-# Namespace in the LangGraph k/v store where each kb_search call
-# persists its structured hits, keyed by `(thread_id, tool_call_id)`.
-# The `ContentReferenceLookupService` reads from here to resolve
-# `citeturn0search{n}` aliases back to (title, url, attribution,
-# snippet) without re-parsing the formatted tool-result text.
-_KB_HITS_NAMESPACE = ("kb_search_hits",)
-
 
 # ---- factory -----------------------------------------------------------------
 
@@ -51,18 +56,14 @@ _KB_HITS_NAMESPACE = ("kb_search_hits",)
 def make_kb_search_tool(
     *,
     knowledge_service: IKnowledgeService,
-    agentic_store: AgenticStore,
+    agentic_store: "AgenticStore",
 ) -> BaseTool:
     """Build the tool with `knowledge_service` + `agentic_store`
-    captured in its closure. Returns the BaseTool ready to bind into
-    the agent's `tools=[...]`.
-
-    `agentic_store` is used to stash structured hit metadata (title,
-    url, attribution, snippet) keyed by `(thread_id, tool_call_id)`
-    so the `ContentReferenceLookupService` can resolve
-    `citeturn0search{n}` aliases back to webpages without re-parsing
-    the formatted text the model sees.
-    """
+    captured in its closure. `agentic_store` persists each call's
+    structured hits (title, url, attribution, snippet) under the
+    per-thread sequence key so `ContentReferenceLookupService` can
+    resolve `citeturn{seq}search{n}` aliases without re-parsing the
+    formatted text the model sees."""
 
     @tool
     async def kb_search(
@@ -70,7 +71,6 @@ def make_kb_search_tool(
             str, "Natural-language question. Will be embedded as one vector."
         ],
         config: RunnableConfig,
-        tool_call_id: Annotated[str, InjectedToolCallId],
     ) -> str:
         """Search the user's uploaded documents for passages relevant
         to a question. Call this when the user asks about topics that
@@ -95,29 +95,61 @@ def make_kb_search_tool(
                 "[tool note] no documents matched. The user may not "
                 "have uploaded any related material yet."
             )
+        thread_id = _thread_id_from_config(config) or "unknown"
+        # Claim this call's sequence number BEFORE formatting so the
+        # alias the model copies (`citeturn{seq}search{n}`) matches the
+        # store key the lookup will read.
+        seq = await _next_search_seq(agentic_store, thread_id)
         await _stash_hits_for_lookup(
             agentic_store=agentic_store,
-            config=config,
-            tool_call_id=tool_call_id,
+            thread_id=thread_id,
+            seq=seq,
             hits=hits,
         )
-        return _format_hits(hits)
+        return _format_hits(hits, seq)
 
     return kb_search
 
 
+async def _next_search_seq(agentic_store: "AgenticStore", thread_id: str) -> int:
+    """Read-and-increment the per-thread kb_search call counter,
+    returning the sequence number to use for THIS call. Defensive: a
+    missing counter (fresh thread) or store hiccup yields seq 0 —
+    which keeps the common single-call case at the familiar
+    `citeturn0search{n}`."""
+    key = kb_count_key(thread_id)
+    current = 0
+    try:
+        item = await agentic_store.store.aget(KB_HITS_NAMESPACE, key)
+        value = getattr(item, "value", None)
+        if isinstance(value, dict) and isinstance(value.get("count"), int):
+            current = value["count"]
+    except Exception:  # noqa: BLE001
+        # Fresh thread, missing key, or a store without aget — start at 0.
+        current = 0
+    try:
+        await agentic_store.store.aput(
+            KB_HITS_NAMESPACE, key, {"count": current + 1}
+        )
+    except Exception:  # noqa: BLE001
+        # If the counter can't persist, the next call collides on this
+        # seq — degraded, not crashing. Sequential per-thread runs make
+        # this vanishingly rare.
+        pass
+    return current
+
+
 async def _stash_hits_for_lookup(
     *,
-    agentic_store: AgenticStore,
-    config: RunnableConfig,
-    tool_call_id: str,
+    agentic_store: "AgenticStore",
+    thread_id: str,
+    seq: int,
     hits,
 ) -> None:
-    """Persist this call's hits to the agentic k/v store so the
-    `ContentReferenceLookupService` can read them later without
-    parsing the model-facing formatted string. Key is `tool_call_id`
-    (globally unique within a thread) so multiple `kb_search` calls
-    in the same turn don't collide."""
+    """Persist this call's hits to the agentic k/v store under the
+    per-thread search sequence number so `ContentReferenceLookupService`
+    can read them later without parsing the model-facing formatted
+    string."""
     payload = [
         {
             "title": _safe_str(h.chunk.extra.get("filename", h.chunk.file_id)),
@@ -127,12 +159,12 @@ async def _stash_hits_for_lookup(
         }
         for h in hits
     ]
-    thread_id = _thread_id_from_config(config) or "unknown"
-    key = f"{thread_id}:{tool_call_id}"
     # Serialize defensively — the store can carry dicts but a JSON
     # round-trip catches any accidental non-serializable field early.
     json.dumps(payload)  # raises if not serializable
-    await agentic_store.store.aput(_KB_HITS_NAMESPACE, key, {"hits": payload})
+    await agentic_store.store.aput(
+        KB_HITS_NAMESPACE, kb_hits_key(thread_id, seq), {"hits": payload}
+    )
 
 
 def _safe_str(value) -> str:
@@ -157,24 +189,21 @@ def _thread_id_from_config(config: RunnableConfig | None) -> str | None:
 # ---- module helpers ----------------------------------------------------------
 
 
-def _format_hits(hits) -> str:
+def _format_hits(hits, seq: int) -> str:
     """Render hits as a numbered list with a citation alias on each.
     The alias format matches what the content-reference scanner
-    recognises (`turn0search{n}`) — the frontend swaps each one for
-    a citation pill linking back to the source file."""
+    recognises (`turn{seq}search{n}`) — `seq` is THIS kb_search call's
+    per-thread sequence number, so citations from different calls don't
+    collide. Items are 1-indexed to match the ChatGPT convention (also
+    what `read_attachment("turnNimageM")` accepts)."""
     parts: list[str] = []
     for idx, hit in enumerate(hits):
         body = hit.chunk.text
         if len(body) > _HIT_PREVIEW_CHARS:
             body = body[:_HIT_PREVIEW_CHARS] + "..."
         filename = hit.chunk.extra.get("filename", hit.chunk.file_id)
-        # `turn0search{idx+1}` is what the content-reference
-        # middleware picks up. 1-indexed to match the ChatGPT
-        # convention (also what `read_attachment("turnNimageM")`
-        # accepts). `turn0` is a placeholder until the alias system
-        # carries the actual turn index through to the tool runtime.
         parts.append(
-            f"[{idx + 1}] {filename}\n{body}\nciteturn0search{idx + 1}"
+            f"[{idx + 1}] {filename}\n{body}\nciteturn{seq}search{idx + 1}"
         )
     return "\n\n".join(parts)
 
