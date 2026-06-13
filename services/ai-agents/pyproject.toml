@@ -2,7 +2,7 @@
 name = "ai-agents-service"
 version = "0.1.0"
 description = "AI agents service: agent definitions, runs, LLM orchestration."
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
   "fastapi==0.111.0",
   "uvicorn[standard]==0.29.0",
@@ -22,11 +22,11 @@ dependencies = [
   "structlog==24.1.0",
   "httpx==0.27.0",
   "setuptools==70.0.0",
-  "opentelemetry-distro==0.46b0",
-  "opentelemetry-exporter-otlp-proto-http==1.25.0",
-  "opentelemetry-instrumentation-fastapi==0.46b0",
-  "opentelemetry-instrumentation-psycopg==0.46b0",
-  "opentelemetry-instrumentation-logging==0.46b0",
+  "opentelemetry-distro>=0.46b0",
+  "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+  "opentelemetry-instrumentation-fastapi==0.63b1",
+  "opentelemetry-instrumentation-psycopg>=0.46b0",
+  "opentelemetry-instrumentation-logging>=0.46b0",
   # PDF text extraction (pure-Python — no binary deps, ships in the wheel).
   # `pypdf` is the maintained successor to `PyPDF2`. We only need text
   # extraction, not rendering, so the small surface fits.
