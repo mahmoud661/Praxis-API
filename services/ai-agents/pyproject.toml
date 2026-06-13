@@ -13,7 +13,7 @@ dependencies = [
   "aiokafka==0.10.0",
   "langgraph>=1.0.5",
   "langgraph-checkpoint-postgres",
-  "psycopg[binary,pool]==3.2.3",
+  "psycopg[binary,pool]==3.3.4",
   "asyncpg>=0.31.0",
   "langchain>=1.2.0",
   "langchain-core>=1.2.4",
