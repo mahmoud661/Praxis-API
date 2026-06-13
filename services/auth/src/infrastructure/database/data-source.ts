@@ -23,11 +23,19 @@ if (!databaseUrl) {
   throw new Error("DATABASE_URL is required (set it in the environment or .env)");
 }
 
+// Only load migration files when ts-node is active (typeorm-ts-node-commonjs CLI)
+// or when running from compiled output in production. Vitest's test runner does
+// not register ts-node, so Node's require() cannot parse .ts migration files.
+const isProd = process.env.NODE_ENV === "production";
+const hasTsNode = ".ts" in require.extensions;
+
 export const AppDataSource = new DataSource({
   type: "postgres",
   url: databaseUrl,
-  synchronize: process.env.NODE_ENV !== "production",
+  synchronize: !isProd,
   logging: ["error", "warn"],
   entities: [User, AuditLog, OutboxEvent],
-  migrations: [path.join(__dirname, "migrations", "*.{ts,js}")],
+  migrations: isProd || hasTsNode
+    ? [path.join(__dirname, "migrations", "*.{ts,js}")]
+    : [],
 });

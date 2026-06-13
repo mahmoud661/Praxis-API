@@ -57,8 +57,8 @@ class RunLimitExceededError(Exception):
 
     def __init__(self, owner_id: str, limit: int) -> None:
         super().__init__(
-            f"concurrent run limit reached ({limit}); wait for a run "
-            f"to finish or cancel one before starting another"
+            f"user {owner_id!r}: concurrent run limit reached ({limit}); "
+            f"wait for a run to finish or cancel one before starting another"
         )
         self.owner_id = owner_id
         self.limit = limit
