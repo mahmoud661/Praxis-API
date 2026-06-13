@@ -4,6 +4,17 @@ global:
   external_labels:
     cluster: backend
 
+# Alert rules (mounted next to this file by docker-compose).
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# Fired alerts are pushed to Alertmanager, which handles grouping,
+# silencing, and delivery (see infra/alertmanager/alertmanager.yml).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
 scrape_configs:
   - job_name: prometheus
     static_configs:

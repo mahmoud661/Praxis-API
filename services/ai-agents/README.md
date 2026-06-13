@@ -44,6 +44,21 @@ app/
 session. This service trusts that header — it is not reachable from
 outside the docker network.
 
+## Abuse limits
+
+Two per-user caps guard the agents WebSocket (`/ws/agents/{thread_id}`),
+configured via env (pydantic-settings, `app/infrastructure/config/env.py`):
+
+- `MAX_WS_CONNECTIONS_PER_USER` (default `8`) — open agents-WS sockets
+  per user. Over the cap the socket is accepted, then closed with
+  WS 1008 `connection limit reached`.
+- `MAX_CONCURRENT_RUNS_PER_USER` (default `4`) — active+queued runs per
+  user across all threads. Over the cap the submission gets an `error`
+  event on the WS (HTTP 429 on retry/edit); the socket stays open.
+
+Both counters are in-process (single-process service) — move them to
+Redis if the service ever scales horizontally.
+
 ## Events consumed
 
 - Topic `auth.events.v1` → `UserRegistered` triggers

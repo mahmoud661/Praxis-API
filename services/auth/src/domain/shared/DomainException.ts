@@ -23,3 +23,8 @@ export class ConflictException extends DomainException {
 export class UnauthenticatedException extends DomainException {
   readonly code = "UNAUTHENTICATED";
 }
+// Account lockout / throttling — maps to HTTP 429. Carries the same generic
+// message as bad credentials so it never confirms whether an account exists.
+export class TooManyAttemptsException extends DomainException {
+  readonly code = "TOO_MANY_ATTEMPTS";
+}

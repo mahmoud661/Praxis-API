@@ -1,17 +1,41 @@
+import "dotenv/config";
+import path from "path";
 import { DataSource } from "typeorm";
 import { User, AuditLog, OutboxEvent } from "../../domain/entities";
-import { loadEnv } from "../config/Env";
 
-// The single TypeORM DataSource. Schema is kept in sync from the entity
-// definitions (`synchronize`) in dev — there is no migration folder. In
-// production `synchronize` is OFF (the local docker stack runs with
-// NODE_ENV=development, so it stays on there).
-const env = loadEnv();
+// The single TypeORM DataSource — used by the app AND by the typeorm CLI
+// (npm run typeorm … -d points at this file; the CLI requires the file to
+// export exactly ONE DataSource instance, so don't add a default export
+// alongside the named one).
+//
+// Schema management:
+//   dev   — `synchronize` keeps the schema in sync from the entities.
+//   prod  — `synchronize` is OFF; run `npm run migration:run:prod` (compiled)
+//           before boot. Migrations live in ./migrations and are wired in via
+//           the glob below, which resolves to .ts under ts-node and .js in
+//           the compiled dist.
+//
+// This module deliberately reads DATABASE_URL/NODE_ENV directly instead of
+// using loadEnv(): the CLI must not demand Kafka/Redis/session secrets just
+// to run a migration. (`dotenv/config` is idempotent — main.ts loads it too.)
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is required (set it in the environment or .env)");
+}
+
+// Only load migration files when ts-node is active (typeorm-ts-node-commonjs CLI)
+// or when running from compiled output in production. Vitest's test runner does
+// not register ts-node, so Node's require() cannot parse .ts migration files.
+const isProd = process.env.NODE_ENV === "production";
+const hasTsNode = ".ts" in require.extensions;
 
 export const AppDataSource = new DataSource({
   type: "postgres",
-  url: env.DATABASE_URL,
-  synchronize: env.NODE_ENV !== "production",
+  url: databaseUrl,
+  synchronize: !isProd,
   logging: ["error", "warn"],
   entities: [User, AuditLog, OutboxEvent],
+  migrations: isProd || hasTsNode
+    ? [path.join(__dirname, "migrations", "*.{ts,js}")]
+    : [],
 });

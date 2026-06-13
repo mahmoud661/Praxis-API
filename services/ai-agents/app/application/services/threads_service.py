@@ -23,16 +23,19 @@ from uuid import uuid4
 from redis.asyncio import Redis
 
 from ...domain.dtos.thread_dto import (
+    HistoryAttachmentView,
     HistoryMessageView,
     HistoryPageView,
     HistoryToolCallView,
+    ThreadConfigView,
     ThreadView,
 )
 from ...domain.IRepos.i_thread_repo import IThreadRepo
 from ...domain.ports.logger import Logger
 from ...infrastructure.agentic.agentic_store import AgenticStore
 from ...infrastructure.ai.title_generator import TitleGenerator
-from ._errors import ThreadNotFoundError  # noqa: F401  (re-export for callers)
+from .agentic.agent_registry import AgentRegistry
+from ._errors import InvalidThreadConfigError, ThreadNotFoundError  # noqa: F401  (re-exports)
 
 
 # Default title used for freshly-created threads — matches ThreadsService.create
@@ -51,6 +54,7 @@ class ThreadsService:
         title_generator: TitleGenerator,
         redis: Redis,
         logger: Logger,
+        agent_registry: AgentRegistry,
     ) -> None:
         # Resolved by the container by annotation class name.
         self._repo = thread_repo
@@ -58,6 +62,7 @@ class ThreadsService:
         self._title_gen = title_generator
         self._redis = redis
         self._logger = logger
+        self._registry = agent_registry
 
     async def create(
         self, *, owner_id: str, title: str | None = None
@@ -95,6 +100,76 @@ class ThreadsService:
         self._logger.info(
             "thread.deleted", thread_id=thread_id, owner_id=owner_id
         )
+
+    async def update_config(
+        self,
+        *,
+        thread_id: str,
+        owner_id: str,
+        config: ThreadConfigView,
+    ) -> ThreadView:
+        """Validate the new config against the agent registry, then
+        persist it. Raises:
+          - `ThreadNotFoundError` if the thread doesn't exist OR the
+            caller doesn't own it (same hidden-existence rule as `get`).
+          - `InvalidThreadConfigError` if `agent_id` is unknown OR a
+            `tool_overrides` entry refers to a tool the agent doesn't
+            expose OR a tool the agent declared non-toggleable.
+        """
+        # Ownership check — 404 on miss-or-foreign.
+        await self.get(thread_id=thread_id, owner_id=owner_id)
+
+        self._validate_config(config)
+        updated = await self._repo.update_config(thread_id, config)
+        if updated is None:
+            # Race: thread deleted between the ownership check and the
+            # write. Treat as not-found.
+            raise ThreadNotFoundError(thread_id)
+        self._logger.info(
+            "thread.config_updated",
+            thread_id=thread_id,
+            owner_id=owner_id,
+            agent_id=config.agent_id,
+            override_count=len(config.tool_overrides),
+        )
+        return updated
+
+    def _validate_config(self, config: ThreadConfigView) -> None:
+        # No agent_id → use account default; nothing to validate yet.
+        agent = (
+            self._registry.get(config.agent_id) if config.agent_id else None
+        )
+        if config.agent_id and agent is None:
+            raise InvalidThreadConfigError(
+                f"unknown agent_id {config.agent_id!r}"
+            )
+        # If no overrides, we're done.
+        if not config.tool_overrides:
+            return
+        # Overrides are only meaningful in the context of a known agent.
+        # When the thread has no explicit agent_id, validate against
+        # the default agent — that's the one the resolver will pick.
+        if agent is None:
+            default = self._registry.get(self._registry.default_id())
+            if default is None:
+                # Defensive: registry boot validation should make this
+                # impossible.
+                raise InvalidThreadConfigError(
+                    "registry has no default agent to validate overrides against"
+                )
+            agent = default
+        tools_by_id = {t.id: t for t in agent.spec.tools}
+        for tool_id in config.tool_overrides:
+            tool = tools_by_id.get(tool_id)
+            if tool is None:
+                raise InvalidThreadConfigError(
+                    f"agent {agent.spec.id!r} has no tool {tool_id!r}"
+                )
+            if not tool.user_toggleable:
+                raise InvalidThreadConfigError(
+                    f"tool {tool_id!r} on agent {agent.spec.id!r} is not "
+                    f"user-toggleable; remove the override"
+                )
 
     async def load_messages(
         self, *, thread_id: str, owner_id: str
@@ -318,7 +393,15 @@ def _pair_messages_for_view(
         if msg_type == "tool":
             continue  # surfaced via the parent AIMessage's tool_calls
         view = _to_history_view(msg, tool_results)
-        if view.content.strip() or view.tool_calls:
+        # Keep the message if it has ANYTHING the UI can render:
+        # visible text, tool calls (assistant turns), OR attachments
+        # (user turns that uploaded a file with no caption text). The
+        # attachments check is critical — user-attached images have
+        # their content rewritten to a list of `image_url` blocks by
+        # the preload middleware, which the flattener drops, leaving
+        # `content` empty. Without this check, the user's "look at
+        # this image" bubble would disappear from history.
+        if view.content.strip() or view.tool_calls or view.attachments:
             out.append(view)
     return out
 
@@ -343,6 +426,15 @@ def _to_history_view(
             tc_id = str(getattr(tc, "id", "") or "")
             tc_name = str(getattr(tc, "name", "") or "")
             tc_args_raw = getattr(tc, "args", None)
+        # Synthetic preload calls (AttachmentPreloadMiddleware fabricates
+        # them with a `preload-` id prefix) are model-facing plumbing —
+        # the user already sees the attachment as a chip on their own
+        # message, so a "read_attachment" tool card for it is noise.
+        # Filtering here also drops the carrier AIMessage entirely: its
+        # content is empty, so with zero visible tool calls it fails the
+        # keep-check in `_pair_messages_for_view`.
+        if tc_id.startswith("preload-"):
+            continue
         tc_args = tc_args_raw if isinstance(tc_args_raw, dict) else {}
         tool_calls.append(
             HistoryToolCallView(
@@ -353,25 +445,104 @@ def _to_history_view(
             )
         )
 
+    attachments = _attachments_from_msg(msg)
+    content_refs = _content_references_from_msg(msg)
     return HistoryMessageView(
         id=msg_id,
         role=role,
         content=content,
         tool_calls=tool_calls,
+        attachments=attachments,
+        content_references=content_refs,
     )
+
+
+def _content_references_from_msg(msg: object) -> list[dict]:
+    """Pull resolved content references off an assistant message. The
+    backend's `ContentReferenceMiddleware` stamps these onto
+    `additional_kwargs.content_references` after each model emission.
+    History reload just passes them straight through."""
+    extras = getattr(msg, "additional_kwargs", None) or {}
+    raw = extras.get("content_references") if isinstance(extras, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _attachments_from_msg(msg: object) -> list[HistoryAttachmentView]:
+    """Pull attachment snapshots out of `HumanMessage.additional_kwargs`.
+    Returns `[]` for non-user messages and messages without attachments.
+    Defensive: malformed entries (missing fields, wrong types) are
+    silently dropped rather than crashing the history render."""
+    extras = getattr(msg, "additional_kwargs", None) or {}
+    raw = extras.get("attachments") if isinstance(extras, dict) else None
+    if not isinstance(raw, list):
+        return []
+    out: list[HistoryAttachmentView] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(
+                HistoryAttachmentView(
+                    id=str(item["id"]),
+                    filename=str(item.get("filename", "")),
+                    mime_type=str(item.get("mime_type", "application/octet-stream")),
+                    size_bytes=int(item.get("size_bytes", 0) or 0),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
 
 
 def _flatten_content(content: object) -> str:
     """LangChain sometimes packs content as a list of content-blocks.
-    Flatten naively to a string the frontend can render."""
+    Flatten naively to a string the frontend can render.
+
+    Non-text blocks (e.g. `{type: "image_url", image_url: {...}}` from
+    the synthetic read_attachment preload) have no `text` field — they
+    drop out of the flattened string rather than serializing as
+    `"None"` or raising. The frontend renders attachments via
+    `additional_kwargs.attachments` anyway, so dropping image blocks
+    here doesn't lose information.
+
+    Plumbing-text guard: some text blocks inside a HumanMessage are
+    middleware plumbing, not the user's words, and must not leak into
+    the rendered bubble:
+      - `[Attached image aliases: …]` — an early preload version.
+      - `[Attachment cleared — …]` / `[Attachment cleared.` — the
+        AttachmentCompactionMiddleware rewrites old image blocks into
+        these eviction stubs IN PERSISTED STATE, so on history reload
+        they'd otherwise appear as the user's own text (with the raw
+        file UUID).
+    Both are skipped here so the bubble shows only what the user typed;
+    the attachment chip still renders from `additional_kwargs.attachments`."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(
-            (block.get("text") if isinstance(block, dict) else str(block))
-            for block in content
-        )
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str) and not _is_plumbing_text(text):
+                    parts.append(text)
+        return "".join(parts)
     return str(content) if content is not None else ""
+
+
+# Prefixes that mark a text block as middleware plumbing rather than
+# the user's own words (see `_flatten_content`).
+_PLUMBING_TEXT_PREFIXES = (
+    "[Attached image aliases:",
+    "[Attachment cleared",
+)
+
+
+def _is_plumbing_text(text: str) -> bool:
+    return text.startswith(_PLUMBING_TEXT_PREFIXES)
 
 
 _ROLE_BY_TYPE: dict[str, str] = {

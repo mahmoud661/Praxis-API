@@ -17,7 +17,7 @@ The raw LangGraph state keeps growing untouched.
 
 Usage::
 
-    from app.core.react_agent.middlewares.compaction_middleware import (
+    from react_agent.middlewares.compaction_middleware import (
         CompactionMiddleware,
         CompactionConfig,
     )
@@ -506,8 +506,33 @@ async def _agenerate_summary(model, messages: list, custom_instructions: str | N
 def _determine_cutoff(messages: list[AnyMessage], keep: ContextSize) -> int:
     kind, value = keep
     if kind == "messages":
-        return max(0, len(messages) - int(value))
-    return max(0, len(messages) - 10)
+        base = max(0, len(messages) - int(value))
+    else:
+        base = max(0, len(messages) - 10)
+    return _align_to_human_boundary(messages, base)
+
+
+def _align_to_human_boundary(messages: list[AnyMessage], cutoff: int) -> int:
+    """Snap `cutoff` BACKWARD to the nearest HumanMessage at or before
+    it, so the kept tail (`messages[cutoff:]`) always starts at a user
+    turn. Two invariants this protects:
+
+      1. No orphan ToolMessage at the head of the tail — a tail opening
+         with a ToolMessage whose parent AIMessage (carrying the
+         tool_calls) got summarized away is rejected by OpenAI with
+         "'tool' must be a response to a preceding 'tool_calls'".
+      2. We never keep FEWER than `keep` messages — moving backward
+         only ever keeps MORE, so the snap can't silently shrink the
+         tail below the configured window (forward-snapping could).
+
+    Correctness (a valid, non-split tail) outranks aggression: if the
+    only HumanMessage is at index 0 (e.g. one giant tool loop), we
+    return 0 and skip summarization this round rather than emit a tail
+    that splits a tool pair."""
+    for idx in range(min(cutoff, len(messages) - 1), -1, -1):
+        if isinstance(messages[idx], HumanMessage):
+            return idx
+    return 0
 
 
 def _build_effective_messages(
@@ -564,11 +589,16 @@ class CompactionMiddleware(AgentMiddleware):
         model,
         *,
         config: CompactionConfig | None = None,
+        max_input_tokens: int | None = None,
     ) -> None:
         super().__init__()
         self._model = model
         self._config = config or CompactionConfig()
-        self._max_input_tokens = _get_max_input_tokens(model)
+        # Explicit override first — proxy-fronted models (LiteLLM) hide
+        # the upstream profile, so introspection returns None and every
+        # `("fraction", ...)` trigger silently never fires. Callers that
+        # know the real context window MUST pass it.
+        self._max_input_tokens = max_input_tokens or _get_max_input_tokens(model)
         self._lock = threading.Lock()
         self._thread_states: dict[str, _ThreadState] = {}
         self._fallback_thread_id = f"session_{uuid.uuid4().hex[8:]}"

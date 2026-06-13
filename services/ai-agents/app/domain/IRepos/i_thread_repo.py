@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..dtos.thread_dto import ThreadView
+from ..dtos.thread_dto import ThreadConfigView, ThreadView
 
 
 class IThreadRepo(Protocol):
@@ -30,3 +30,12 @@ class IThreadRepo(Protocol):
     async def touch(self, thread_id: str) -> None:
         """Bump `updated_at` to now. Called when a run starts on the thread
         so the sidebar's sort-by-recent works."""
+
+    async def update_config(
+        self,
+        thread_id: str,
+        config: ThreadConfigView,
+    ) -> ThreadView | None:
+        """Persist a new `config` block for the thread, leaving every
+        other field untouched. Returns the refreshed view or `None`
+        when the thread doesn't exist."""

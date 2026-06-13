@@ -36,4 +36,17 @@ export class OutboxEvent {
 
   @Column({ name: "published_at", type: "timestamptz", nullable: true })
   publishedAt!: Date | null;
+
+  // Delivery bookkeeping. Each failed Kafka publish increments `attempts` and
+  // records `lastError`; once attempts reaches OUTBOX_MAX_ATTEMPTS the poller
+  // stamps `deadAt` and stops retrying (the row is parked, never deleted).
+  // An operator can NULL dead_at to re-queue the event.
+  @Column({ type: "int", default: 0 })
+  attempts!: number;
+
+  @Column({ name: "last_error", type: "text", nullable: true })
+  lastError!: string | null;
+
+  @Column({ name: "dead_at", type: "timestamptz", nullable: true })
+  deadAt!: Date | null;
 }

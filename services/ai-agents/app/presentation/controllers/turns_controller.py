@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from ...application.services._errors import (
     InvalidTurnTargetError,
     MessageNotFoundError,
+    RunLimitExceededError,
     ThreadNotFoundError,
     TurnInProgressError,
 )
@@ -66,6 +67,11 @@ class TurnsController:
                 status_code=409,
                 detail={"error": "TURN_IN_PROGRESS"},
             )
+        except RunLimitExceededError as err:
+            raise HTTPException(
+                status_code=429,
+                detail={"error": "RUN_LIMIT_EXCEEDED", "message": str(err)},
+            )
 
     async def edit(
         self,
@@ -96,4 +102,9 @@ class TurnsController:
             raise HTTPException(
                 status_code=409,
                 detail={"error": "TURN_IN_PROGRESS"},
+            )
+        except RunLimitExceededError as err:
+            raise HTTPException(
+                status_code=429,
+                detail={"error": "RUN_LIMIT_EXCEEDED", "message": str(err)},
             )

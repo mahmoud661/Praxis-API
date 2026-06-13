@@ -48,10 +48,13 @@ volumes:
   kafka_data:
   redis_data:
   prometheus_data:
+  alertmanager_data:
   grafana_data:
   loki_data:
   postgres_auth_data:
   postgres_agents_data:
+  qdrant_data:
+  ai_agents_files:
   caddy_data:
   caddy_config:
 
@@ -123,20 +126,33 @@ services:
     <<: *platform-defaults
 
   # One-shot init: declares topics + DLQs, then exits 0.
+  # Replication is env-driven so the prod overlay can raise it without
+  # forking this block: dev defaults to rf=1 / min-ISR=1 (single broker);
+  # docker-compose.prod.yml sets 3 / 2. The custom entrypoint bypasses the
+  # image's KAFKA_* env-to-server-properties translation, so these are
+  # plain shell vars here. (contracts/topics.json's replicationFactor is
+  # documentation — nothing reads it at runtime; this env is the source
+  # of truth per environment.)
   kafka-init:
     image: apache/kafka:3.7.1
     container_name: kafka-init
     networks: [backend_platform]
     depends_on:
       kafka: { condition: service_healthy }
+    environment:
+      KAFKA_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR:-1}
+      KAFKA_MIN_INSYNC_REPLICAS: ${KAFKA_MIN_INSYNC_REPLICAS:-1}
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         set -e
-        echo "Creating topics..."
+        RF="$${KAFKA_REPLICATION_FACTOR:-1}"
+        MIN_ISR="$${KAFKA_MIN_INSYNC_REPLICAS:-1}"
+        echo "Creating topics (replication-factor=$$RF, min.insync.replicas=$$MIN_ISR)..."
         for topic in auth.events.v1 agents.events.v1 auth.events.v1.dlq agents.events.v1.dlq; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
-            --topic "$$topic" --partitions 3 --replication-factor 1
+            --topic "$$topic" --partitions 3 --replication-factor "$$RF" \
+            --config min.insync.replicas="$$MIN_ISR"
         done
         echo "Topics ready:"
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
@@ -200,6 +216,29 @@ services:
     <<: *platform-defaults
 
   # ============================================================
+  # Platform: vector store (Qdrant)
+  # ============================================================
+  # Single-collection setup; per-user isolation is via payload filter
+  # on `owner_id` (see QdrantVectorStore). Volume persists collection
+  # data across container restarts. Healthcheck uses the readiness
+  # endpoint Qdrant exposes on the REST port.
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: qdrant
+    networks: [backend_platform]
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    <<: *platform-defaults
+
+  # ============================================================
   # Platform: observability — traces, metrics, logs, dashboards
   # ============================================================
   jaeger:
@@ -234,11 +273,35 @@ services:
       - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--web.enable-lifecycle"
+    depends_on: [alertmanager]
+    <<: *platform-defaults
+
+  # Receives fired alerts from Prometheus; groups, dedupes, and delivers
+  # them. Local config ships a placeholder webhook receiver — swap in
+  # Slack/PagerDuty for production (see alertmanager/alertmanager.yml).
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    networks: [backend_platform]
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9093/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     <<: *platform-defaults
 
   # Centralized log store. Promtail tails Docker container stdout/stderr
@@ -339,11 +402,38 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       KAFKA_MAX_HANDLER_ATTEMPTS: ${KAFKA_MAX_HANDLER_ATTEMPTS:-3}
+      # Vector store (Qdrant) — single shared collection, per-user
+      # isolation enforced via owner_id payload filter inside the
+      # adapter. The embedding model must match the vector size below:
+      # `text-embedding-3-small` is 1536 dims, the platform default.
+      VECTOR_STORE_BACKEND: ${VECTOR_STORE_BACKEND:-qdrant}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-praxis_knowledge}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_VECTOR_SIZE: ${EMBEDDING_VECTOR_SIZE:-1536}
+      # LangSmith tracing — LangChain / LangGraph picks these up
+      # directly from process env (no app wiring needed). Traces go
+      # to the `praxis` project at smith.langchain.com. Leave the key
+      # blank in dev to disable; tracing only activates when V2=true
+      # AND a non-empty API key is present.
+      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-praxis}
+      # Pin the local-storage dir to the volume mount below so
+      # uploaded file bytes survive container restarts. Default in
+      # env.py is /tmp/praxis-files which gets wiped every restart —
+      # metadata (in Postgres) would survive but bytes wouldn't, so
+      # `GET /files/{id}/content` would 404 after every redeploy.
+      FILES_LOCAL_DIR: /var/lib/praxis/files
+    volumes:
+      - ai_agents_files:/var/lib/praxis/files
     depends_on:
       postgres-agents: { condition: service_healthy }
       redis: { condition: service_healthy }
       kafka: { condition: service_healthy }
       kafka-init: { condition: service_completed_successfully }
+      qdrant: { condition: service_healthy }
     <<: *app-defaults
 
   gateway:
@@ -368,7 +458,6 @@ services:
       AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
       AI_AGENTS_SERVICE_URL: ${AI_AGENTS_SERVICE_URL}
       # Resilience
-      PROXY_RETRY_COUNT: ${PROXY_RETRY_COUNT:-2}
       PROXY_CB_THRESHOLD: ${PROXY_CB_THRESHOLD:-5}
       PROXY_CB_RESET_MS: ${PROXY_CB_RESET_MS:-15000}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}

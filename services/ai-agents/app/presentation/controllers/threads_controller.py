@@ -12,10 +12,30 @@ from __future__ import annotations
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ...application.services._errors import ThreadNotFoundError
-from ...domain.dtos.thread_dto import ThreadView
+from ...application.services._errors import (
+    InvalidThreadConfigError,
+    ThreadNotFoundError,
+)
+from ...domain.dtos.thread_dto import ThreadConfigView, ThreadView
 from ...domain.IServices.i_threads_service import IThreadsService
 from ..http.dependencies import current_user_id
+
+
+class ThreadConfigResponse(BaseModel):
+    """Per-thread overrides — mirrors `ThreadConfigView`. Empty fields
+    mean "use the agent / account defaults" on the resolver side."""
+
+    agent_id: str | None = None
+    tool_overrides: dict[str, bool] = Field(default_factory=dict)
+    custom_system_prompt_id: str | None = None
+
+    @classmethod
+    def from_view(cls, c: ThreadConfigView) -> "ThreadConfigResponse":
+        return cls(
+            agent_id=c.agent_id,
+            tool_overrides=dict(c.tool_overrides),
+            custom_system_prompt_id=c.custom_system_prompt_id,
+        )
 
 
 class ThreadResponse(BaseModel):
@@ -23,6 +43,7 @@ class ThreadResponse(BaseModel):
     title: str
     created_at: str
     updated_at: str
+    config: ThreadConfigResponse = Field(default_factory=ThreadConfigResponse)
 
     @classmethod
     def from_view(cls, t: ThreadView) -> "ThreadResponse":
@@ -31,7 +52,19 @@ class ThreadResponse(BaseModel):
             title=t.title,
             created_at=t.created_at,
             updated_at=t.updated_at,
+            config=ThreadConfigResponse.from_view(t.config),
         )
+
+
+class UpdateThreadConfigBody(BaseModel):
+    """PATCH body. All fields optional — only the keys present in the
+    request payload are written; missing keys keep their current
+    value. Pass `tool_overrides: {}` to clear all overrides explicitly;
+    omitting the key leaves them untouched."""
+
+    agent_id: str | None = Field(default=None)
+    tool_overrides: dict[str, bool] | None = Field(default=None)
+    custom_system_prompt_id: str | None = Field(default=None)
 
 
 class ThreadListResponse(BaseModel):
@@ -54,11 +87,31 @@ class HistoryToolCallResponse(BaseModel):
     result: str | None = None
 
 
+class HistoryAttachmentResponse(BaseModel):
+    """Wire shape for one persisted attachment on a user message.
+    Frontend renders these as chips/thumbnails. `id` doubles as the
+    handle for `GET /v1/files/{id}/content` if the frontend wants to
+    fetch bytes for a thumbnail."""
+
+    id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+
+
 class HistoryMessageResponse(BaseModel):
     id: str
     role: str
     content: str
     tool_calls: list[HistoryToolCallResponse] = Field(default_factory=list)
+    attachments: list[HistoryAttachmentResponse] = Field(default_factory=list)
+    # Resolved content references stamped on assistant messages by
+    # `ContentReferenceMiddleware`. Each entry has `kind` +
+    # `matched_text` + `start_idx` + `end_idx` + a payload keyed to
+    # the kind (`attachment` block or `items` list for citations).
+    # Wire shape is `list[dict]` because the union of variants is
+    # easier to evolve than a Pydantic discriminated union here.
+    content_references: list[dict] = Field(default_factory=list)
 
 
 class HistoryResponse(BaseModel):
@@ -111,6 +164,56 @@ class ThreadsController:
             await self._service.delete(thread_id=thread_id, owner_id=user_id)
         except ThreadNotFoundError:
             raise HTTPException(status_code=404, detail={"error": "NOT_FOUND"})
+
+    async def update_thread_config(
+        self,
+        thread_id: str,
+        body: UpdateThreadConfigBody,
+        user_id: str = Depends(current_user_id),
+    ) -> ThreadResponse:
+        """PATCH /v1/threads/{thread_id}/config.
+
+        Reads the current config (404 if the thread is missing or not
+        owned), merges in the body's set fields, and writes the
+        validated result. Unset body fields keep their current value —
+        sparse PATCH semantics. Pass `tool_overrides: {}` (empty
+        object) to clear overrides explicitly.
+        """
+        try:
+            current = await self._service.get(
+                thread_id=thread_id, owner_id=user_id
+            )
+        except ThreadNotFoundError:
+            raise HTTPException(status_code=404, detail={"error": "NOT_FOUND"})
+
+        merged = ThreadConfigView(
+            agent_id=(
+                body.agent_id if "agent_id" in body.model_fields_set
+                else current.config.agent_id
+            ),
+            tool_overrides=(
+                dict(body.tool_overrides)
+                if body.tool_overrides is not None
+                else dict(current.config.tool_overrides)
+            ),
+            custom_system_prompt_id=(
+                body.custom_system_prompt_id
+                if "custom_system_prompt_id" in body.model_fields_set
+                else current.config.custom_system_prompt_id
+            ),
+        )
+        try:
+            updated = await self._service.update_config(
+                thread_id=thread_id, owner_id=user_id, config=merged
+            )
+        except ThreadNotFoundError:
+            raise HTTPException(status_code=404, detail={"error": "NOT_FOUND"})
+        except InvalidThreadConfigError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "INVALID_CONFIG", "message": str(exc)},
+            )
+        return ThreadResponse.from_view(updated)
 
     async def thread_history(
         self,
@@ -169,6 +272,16 @@ class ThreadsController:
                         )
                         for tc in m.tool_calls
                     ],
+                    attachments=[
+                        HistoryAttachmentResponse(
+                            id=a.id,
+                            filename=a.filename,
+                            mime_type=a.mime_type,
+                            size_bytes=a.size_bytes,
+                        )
+                        for a in m.attachments
+                    ],
+                    content_references=list(m.content_references),
                 )
                 for m in messages
             ],

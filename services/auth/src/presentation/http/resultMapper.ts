@@ -4,6 +4,7 @@ import {
   ConflictException,
   DomainException,
   NotFoundException,
+  TooManyAttemptsException,
   UnauthenticatedException,
   ValidationException,
   InvariantViolation,
@@ -31,5 +32,6 @@ function mapStatus(err: DomainException): number {
   if (err instanceof UnauthenticatedException) return 401;
   if (err instanceof NotFoundException) return 404;
   if (err instanceof ConflictException) return 409;
+  if (err instanceof TooManyAttemptsException) return 429;
   return 500;
 }

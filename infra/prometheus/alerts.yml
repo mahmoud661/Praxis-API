@@ -1,0 +1,54 @@
+# Alert rules. Loaded by prometheus.yml via `rule_files`; fired alerts go
+# to Alertmanager (see infra/alertmanager/alertmanager.yml).
+#
+# Rules only reference metrics that actually exist in this stack:
+#   - `up` — synthesised by Prometheus per scrape target (prometheus.yml
+#     scrapes itself and the OTel collector).
+#   - `http_server_duration_milliseconds_*` — the HTTP server histogram
+#     from OTel auto-instrumentation, re-exported by the collector's
+#     Prometheus exporter on :8889. Each service appears as an
+#     `exported_job` label (same convention the Grafana dashboard uses).
+
+groups:
+  - name: platform
+    rules:
+      # A scrape target stopped answering. With only two targets
+      # (prometheus itself, otel-collector) this is the big one: if the
+      # collector is down, *all* service telemetry is dark.
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scrape target {{ $labels.job }} is down"
+          description: "{{ $labels.instance }} has failed scrapes for 2 minutes."
+
+  - name: http
+    rules:
+      # More than 5% of a service's requests returned 5xx over 5 minutes.
+      # `exported_job` is the OTEL_SERVICE_NAME (gateway, auth-service,
+      # ai-agents-service). The >0.05 threshold matches the red line on
+      # the Grafana overview dashboard.
+      - alert: HighErrorRate
+        expr: |
+          sum by (exported_job) (rate(http_server_duration_milliseconds_count{http_status_code=~"5.."}[5m]))
+            / sum by (exported_job) (rate(http_server_duration_milliseconds_count[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.exported_job }} 5xx rate above 5%"
+          description: "{{ $labels.exported_job }} is returning {{ $value | humanizePercentage }} 5xx over the last 5 minutes."
+
+      # p95 request latency above 1s for 10 minutes. Histogram buckets are
+      # in milliseconds (OTel default unit for this instrument).
+      - alert: HighRequestLatency
+        expr: |
+          histogram_quantile(0.95, sum by (le, exported_job) (rate(http_server_duration_milliseconds_bucket[5m]))) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.exported_job }} p95 latency above 1s"
+          description: "{{ $labels.exported_job }} p95 is {{ $value | humanize }}ms over the last 5 minutes."

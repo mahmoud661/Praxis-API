@@ -88,8 +88,6 @@ def _get_subagents(
         if interrupt_on:
             _middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))
 
-        # Get use_sequential_tools flag (default to False)
-        use_sequential_tools = agent_.get("use_sequential_tools", False)
         state_schema = agent_.get("state_schema", None)
 
         agents[agent_["name"]] = create_agent(
@@ -97,7 +95,6 @@ def _get_subagents(
             system_prompt=agent_["system_prompt"],
             tools=_tools,
             middleware=_middleware,
-            use_sequential_tools=use_sequential_tools,
             state_schema=state_schema,
         )
     return agents, subagent_descriptions
@@ -262,7 +259,6 @@ def _create_task_tool(
                 system_prompt=sa_config["system_prompt"],
                 tools=_tools,
                 middleware=_subagent_middleware,
-                use_sequential_tools=sa_config.get("use_sequential_tools", False),
                 state_schema=sa_config.get("state_schema", None),
             )
 

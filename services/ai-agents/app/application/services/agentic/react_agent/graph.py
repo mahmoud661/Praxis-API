@@ -63,7 +63,6 @@ def create_react_agent(
     response_format: ResponseFormat[ResponseT] | type[ResponseT] | None = None,
     state_schema: type[AgentState[ResponseT]] | None = None,
     context_schema: type[ContextT] | None = None,
-    use_sequential_tools: bool = False,
     checkpointer: Any | None = None,
 ) -> CompiledStateGraph[AgentState[ResponseT], ContextT, _InputAgentState, _OutputAgentState[ResponseT]]:
     """Create a React agent with the given configuration.
@@ -76,7 +75,6 @@ def create_react_agent(
         response_format: Response format specification
         state_schema: Custom state schema
         context_schema: Custom context schema
-        use_sequential_tools: If True, tools are executed sequentially (needed for DB session safety)
         checkpointer: Optional persistence checkpointer
     """
     model_instance = init_chat_model(model) if isinstance(model, str) else model
@@ -90,9 +88,7 @@ def create_react_agent(
         middleware_w_wrap_tool_call, middleware_w_awrap_tool_call
     )
 
-    tool_node, default_tools = setup_tools(
-        tools, middleware, wrap_tool_call_wrapper, awrap_tool_call_wrapper, use_sequential_tools
-    )
+    tool_node, default_tools = setup_tools(tools, middleware, wrap_tool_call_wrapper, awrap_tool_call_wrapper)
 
     validate_middleware(middleware)
     middleware_by_hook = collect_middleware_by_hook(middleware)

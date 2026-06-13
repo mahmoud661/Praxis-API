@@ -31,6 +31,7 @@ Every message put on a platform topic uses this shape:
 ```
 
 Kafka record:
+
 - **key**     = `metadata.aggregateId` (ordering within an aggregate)
 - **headers** = `event-name`, `event-id`, `event-version`
 
@@ -43,5 +44,13 @@ Kafka record:
 
 ## Schemas
 
-JSON Schema files under `schemas/<topic>/<EventName>.json`. Validate
-producer/consumer payloads against them in CI.
+JSON Schema files under `schemas/<topic>/<EventName>.json`.
+
+CI enforces the structure via `scripts/validate-contracts.mjs` (the
+`contracts` job): every event listed in `topics.json` must have a schema
+file here, every schema must be a sane payload schema (`type: "object"`
+with `properties`, no envelope keys), and orphan schema files fail the
+build. Run it locally with `node scripts/validate-contracts.mjs`.
+
+Runtime payload validation against these schemas is still up to each
+producer/consumer.

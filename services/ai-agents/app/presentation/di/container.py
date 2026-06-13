@@ -28,7 +28,7 @@ from typing import Any, Callable, get_type_hints
 
 from redis.asyncio import Redis
 
-from ...application.services.agentic.main_agent import MainAgent
+from ...application.services.agentic.agent_registry import AgentRegistry
 from ...application.services.agentic.run_manager import RunManager
 from ...application.services.agentic.runner import AgentRunner
 from ...domain.ports.event_consumer import EventConsumer
@@ -38,31 +38,38 @@ from ...infrastructure.agentic.agentic_store import AgenticStore
 from ...infrastructure.ai.title_generator import TitleGenerator
 from ...infrastructure.cache.event_stream import EventStream
 from ...infrastructure.config.env import load_env
+from ...infrastructure.documents.document_extractor import DocumentExtractor
+from ...infrastructure.files.file_storage import (
+    IFileStorage,
+    InMemoryFileStorage,
+    LocalFileStorage,
+    S3FileStorage,
+)
+from ...infrastructure.llm.embedding_client import EmbeddingClient
+from ...infrastructure.llm.litellm_client import LiteLLMClient
+from ...infrastructure.vector.in_memory_vector_store import InMemoryVectorStore
+from ...infrastructure.vector.qdrant_vector_store import QdrantVectorStore
 from ...infrastructure.logging.structlog_logger import StructlogLogger
 from ...infrastructure.messaging.kafka_event_consumer import KafkaEventConsumer
 from ...infrastructure.messaging.kafka_event_publisher import KafkaEventPublisher
 from ..controllers.agents_runs_controller import AgentsRunsController
+from ..controllers.capabilities_controller import CapabilitiesController
+from ..controllers.files_controller import FilesController
 from ..controllers.health_controller import HealthController
 from ..controllers.threads_controller import ThreadsController
 from ..controllers.turns_controller import TurnsController
+from ..http.ws_connection_registry import WsConnectionRegistry
 # Routes are auto-mounted by `mount_routes()` scanning presentation/routes/.
-# Importing each module triggers its `BaseRoute` subclass registration;
-# binding the classes into the `_AUTO_MOUNT_ROUTES` tuple below makes the
-# references semantic (so ruff F401 + CodeQL `py/unused-import` both stay
-# quiet) and keeps a future packaging step from tree-shaking the modules.
-from ..routes.agents_runs_route import AgentsRunsRoute
-from ..routes.agents_ws_route import AgentsWsRoute
-from ..routes.notifications_ws_route import NotificationsWsRoute
-from ..routes.threads_route import ThreadsRoute
-from ..routes.turns_route import TurnsRoute
-
-_AUTO_MOUNT_ROUTES: tuple[type, ...] = (
-    AgentsRunsRoute,
-    AgentsWsRoute,
-    NotificationsWsRoute,
-    ThreadsRoute,
-    TurnsRoute,
-)
+# Importing each module triggers its `BaseRoute` subclass registration.
+# The `as X` re-export form signals to linters and static analysers that
+# these imports are intentional, preventing false unused-import alerts.
+from ..routes.agents_runs_route import AgentsRunsRoute as AgentsRunsRoute
+from ..routes.agents_ws_route import AgentsWsRoute as AgentsWsRoute
+from ..routes.capabilities_route import CapabilitiesRoute as CapabilitiesRoute
+from ..routes.files_route import FilesRoute as FilesRoute
+from ..routes.notifications_ws_route import NotificationsWsRoute as NotificationsWsRoute
+from ..routes.threads_route import ThreadsRoute as ThreadsRoute
+from ..routes.turns_route import TurnsRoute as TurnsRoute
 
 _APP_ROOT = Path(__file__).resolve().parents[2]  # .../app/
 
@@ -108,6 +115,12 @@ class Container:
                 if name.startswith("_"):
                     continue
                 token = token_fn(obj)
+                # Skip if a binding for this token is already in place —
+                # lets the composition root pre-register a service
+                # manually (in dep-order) to break cycles the
+                # alphabetical glob can't handle on its own.
+                if self.has(token):
+                    continue
                 self.register(token, self.construct(obj))
 
     def construct(self, cls: type) -> Any:
@@ -178,22 +191,114 @@ def register_dependencies() -> Container:
         token_fn=lambda cls: "I" + cls.__name__.replace("Repo", "") + "Repo",
     )
 
-    # MainAgent compiles its graph lazily on first use, so it can be built
-    # here before AgenticStore.init() has connected — get() defers _build()
-    # until after the lifespan has wired the checkpointer.
-    container.register("MainAgent", MainAgent(container.resolve("AgenticStore"), env))
+    # LiteLLM admin client — used by the agent registry's boot-time
+    # validation AND the capabilities service for per-agent
+    # `underlying` metadata. Single instance, cached internally.
+    container.register(
+        "LiteLLMClient",
+        LiteLLMClient(
+            base_url=env.litellm_proxy_api_base,
+            master_key=env.litellm_master_key,
+            logger=logger,
+        ),
+    )
+
+    # Agent registry built here BUT discovery deferred to after the
+    # services auto-register below — agents depend on IFilesService /
+    # IKnowledgeService which don't exist until then. The registry
+    # itself goes into the container right away because downstream
+    # services (CapabilitiesService) take it as an __init__ dep.
+    registry = AgentRegistry(
+        agents_folder=(
+            _APP_ROOT / "application" / "services" / "agentic" / "agents"
+        ),
+        logger=logger,
+        constructor=container.construct,
+    )
+    container.register("AgentRegistry", registry)
+
+    # Attachment captioner — the app's implementation of the react_agent
+    # library's CaptionModel port (LiteLLM-backed). Agents resolve it by
+    # class-name annotation, so it must exist before registry.discover().
+    from ...infrastructure.llm.attachment_captioner import AttachmentCaptioner
+
+    container.register("AttachmentCaptioner", AttachmentCaptioner(env, logger))
+
+    # File storage backend — picked by env var. Local is the default
+    # and matches our single-pod compose layout; S3 is interface-only
+    # today (its constructor raises with instructions). InMemory exists
+    # for tests / dev smoke runs.
+    storage: IFileStorage
+    backend = env.files_storage_backend.lower()
+    if backend == "memory":
+        storage = InMemoryFileStorage()
+    elif backend == "s3":
+        # Constructor raises NotImplementedError with a clear message.
+        # We instantiate at boot so a misconfig fails loudly here,
+        # not on the first upload.
+        storage = S3FileStorage(bucket="praxis-files")
+    else:
+        storage = LocalFileStorage(env.files_local_dir, logger)
+    container.register("IFileStorage", storage)
+
+    # Document extractor — stateless, no DI deps. One instance shared
+    # across all callers (the read_attachment tool, KnowledgeService).
+    container.register("IDocumentExtractor", DocumentExtractor())
+
+    # Embedding client — talks to the LiteLLM proxy's /embeddings
+    # endpoint. Same auth/base-url as the chat client. Holds an
+    # httpx.AsyncClient with keep-alive; closed via lifespan shutdown.
+    container.register("IEmbeddingClient", EmbeddingClient(env, logger))
+
+    # Vector store — Qdrant by default; InMemory for dev/test setups
+    # without Qdrant running. The collection is created on first
+    # `ensure_ready()` call from the lifespan startup hook.
+    if env.vector_store_backend.lower() == "memory":
+        container.register("IVectorStore", InMemoryVectorStore())
+    else:
+        container.register("IVectorStore", QdrantVectorStore(env, logger))
+
+    # Pre-register KnowledgeService + FilesService manually so the
+    # AgentRunner construction below can resolve IFilesService. The
+    # alphabetical auto_register globber would build FilesService BEFORE
+    # KnowledgeService (FilesService depends on IKnowledgeService) and
+    # fail. Pre-registering both here in dep-order breaks the cycle;
+    # the later auto_register skips them via the has-token short-circuit.
+    from ...application.services.content_reference_lookup_service import (
+        ContentReferenceLookupService,
+    )
+    from ...application.services.files_service import FilesService
+    from ...application.services.knowledge_service import KnowledgeService
+
+    container.register("IKnowledgeService", container.construct(KnowledgeService))
+    container.register("IFilesService", container.construct(FilesService))
+    # Pre-register under the port's name `IContentReferenceLookup` so
+    # `ContentReferenceMiddleware` resolves it. Class name doesn't
+    # match the `I + cls.__name__` convention (port is shorter than
+    # impl class name), so we do this by hand.
+    container.register(
+        "IContentReferenceLookup",
+        container.construct(ContentReferenceLookupService),
+    )
 
     # AgentRunner: streams events from the LangGraph graph through an opaque
-    # `on_event` callback. The RunManager wires that callback to the
-    # EventStream so a WebSocket disconnect doesn't kill the run.
+    # `on_event` callback. Resolves the agent to execute via the registry
+    # (default agent today; per-thread agent_id later) — it never touches
+    # the react_agent runtime directly. The RunManager wires `on_event` to
+    # the EventStream so a WebSocket disconnect doesn't kill the run.
     container.register(
         "AgentRunner",
-        AgentRunner(container.resolve("MainAgent"), logger),
+        AgentRunner(
+            registry,
+            container.resolve("IFilesService"),
+            logger,
+        ),
     )
 
     # RunManager: owns the background asyncio.Task per thread, the running
     # set in Redis, and the notifications pub/sub. The Task survives WS
-    # disconnects; clients reconnect and replay the EventStream.
+    # disconnects; clients reconnect and replay the EventStream. The cap
+    # bounds active+queued turns per user across all their threads.
     container.register(
         "RunManager",
         RunManager(
@@ -202,7 +307,16 @@ def register_dependencies() -> Container:
             redis,
             logger,
             container.resolve("IThreadRepo"),
+            max_concurrent_runs_per_user=env.max_concurrent_runs_per_user,
         ),
+    )
+
+    # WS connection registry — per-user cap on open agents-WS sockets.
+    # In-memory is authoritative because the service is single-process;
+    # AgentsWsRoute resolves it by annotation class name.
+    container.register(
+        "WsConnectionRegistry",
+        WsConnectionRegistry(env.max_ws_connections_per_user),
     )
 
     publisher: EventPublisher = KafkaEventPublisher(
@@ -232,6 +346,12 @@ def register_dependencies() -> Container:
         folder=_APP_ROOT / "application" / "services",
         token_fn=lambda cls: "I" + cls.__name__,
     )
+
+    # Agents discover NOW — after services auto-register so an agent's
+    # __init__ can resolve IFilesService, IKnowledgeService, etc.
+    # `.validate_against(litellm)` is async and stays deferred to the
+    # lifespan; this call is the synchronous instantiation pass.
+    registry.discover()
 
     # Wire post-turn hooks now that BOTH RunManager and ThreadsService
     # have been constructed. ThreadsService.maybe_generate_title runs
@@ -263,6 +383,14 @@ def register_dependencies() -> Container:
     container.register(
         "TurnsController",
         TurnsController(container.resolve("ITurnsService")),
+    )
+    container.register(
+        "CapabilitiesController",
+        CapabilitiesController(container.resolve("ICapabilitiesService")),
+    )
+    container.register(
+        "FilesController",
+        FilesController(container.resolve("IFilesService")),
     )
 
     return container

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..dtos.thread_dto import HistoryMessageView, HistoryPageView, ThreadView
+from ..dtos.thread_dto import (
+    HistoryMessageView,
+    HistoryPageView,
+    ThreadConfigView,
+    ThreadView,
+)
 
 
 class IThreadsService(Protocol):
@@ -44,3 +49,15 @@ class IThreadsService(Protocol):
     ) -> str | None:
         """Auto-name a thread from its first user message. No-op if the
         thread already has a non-default title. See implementation."""
+
+    async def update_config(
+        self,
+        *,
+        thread_id: str,
+        owner_id: str,
+        config: ThreadConfigView,
+    ) -> ThreadView:
+        """Replace the thread's `config` block. Validates the proposed
+        config against the agent registry: unknown agent ids, missing
+        tools, or overrides for non-toggleable tools all raise
+        `InvalidThreadConfigError` (→ 400)."""

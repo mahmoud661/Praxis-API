@@ -1,0 +1,71 @@
+# CI smoke-test overlay — disables the observability stack (Jaeger, OTel,
+# Prometheus, Alertmanager, Loki, Promtail, Grafana) and the edge layer
+# (Caddy) so the runner doesn't OOM on the 7 GB GitHub Actions machine.
+# Kafka UI is also skipped — it's an admin UI with no role in the smoke test.
+#
+# Usage (from backend/infra/):
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.ci.yml \
+#     --env-file .env.ci \
+#     up -d
+#
+# The gateway still gets its own published port (${GATEWAY_PORT:-4000}:3000)
+# from the base file, so the smoke script can reach it directly without Caddy.
+
+name: backend
+
+services:
+  # Assign the profile "obs" (inactive in CI) to every observability service.
+  # Compose ignores services whose profile is not activated, so these are
+  # effectively removed from the CI boot without touching the base file.
+
+  jaeger:
+    profiles: [obs]
+
+  otel-collector:
+    profiles: [obs]
+
+  prometheus:
+    profiles: [obs]
+
+  alertmanager:
+    profiles: [obs]
+
+  loki:
+    profiles: [obs]
+
+  promtail:
+    profiles: [obs]
+
+  grafana:
+    profiles: [obs]
+
+  caddy:
+    profiles: [obs]
+
+  kafka-ui:
+    profiles: [obs]
+
+  # Drop the OTEL_* env vars that would produce connection-refused noise when
+  # the collector isn't running. The SDKs handle a missing endpoint gracefully
+  # (retries with backoff), but the stderr noise can obscure real errors in CI.
+  auth-service:
+    environment:
+      OTEL_TRACES_EXPORTER: none
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      NODE_OPTIONS: ""
+
+  ai-agents-service:
+    environment:
+      OTEL_TRACES_EXPORTER: none
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+
+  gateway:
+    environment:
+      OTEL_TRACES_EXPORTER: none
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      NODE_OPTIONS: ""

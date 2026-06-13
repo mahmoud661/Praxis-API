@@ -40,6 +40,7 @@ from redis.asyncio import Redis
 from ....domain.IRepos.i_thread_repo import IThreadRepo
 from ....domain.ports.logger import Logger
 from ....infrastructure.cache.event_stream import EventStream
+from .._errors import RunLimitExceededError
 from .runner import AgentRunner
 
 
@@ -63,6 +64,12 @@ class _QueuedTurn:
     id: str
     content: str
     enqueued_at: str
+    # File ids the user attached for this turn. Threaded into the
+    # LangGraph config so AttachmentPreloadMiddleware can synthesize a
+    # fake `read_attachment` tool call per id, putting the file in
+    # context before the model sees the user's text. Empty list when
+    # the user sent text only.
+    attachments: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -86,12 +93,18 @@ class RunManager:
         redis: Redis,
         logger: Logger,
         thread_repo: IThreadRepo,
+        max_concurrent_runs_per_user: int = 4,
     ) -> None:
         self._runner = runner
         self._stream = event_stream
         self._redis = redis
         self._logger = logger
         self._thread_repo = thread_repo
+        # Per-user cap on active+queued turns across ALL threads
+        # (Env.max_concurrent_runs_per_user). Counted from `_handles`
+        # directly — in-process state is authoritative because this is
+        # a single-process service.
+        self._max_runs_per_user = max_concurrent_runs_per_user
         self._handles: dict[str, RunHandle] = {}
         self._next_turn_id = 0
         # Post-turn hooks — fired as fire-and-forget background tasks
@@ -110,15 +123,52 @@ class RunManager:
     # ----- public API ------------------------------------------------------
 
     async def start_run(
-        self, *, thread_id: str, owner_id: str, content: str
+        self,
+        *,
+        thread_id: str,
+        owner_id: str,
+        content: str,
+        attachments: list[str] | None = None,
     ) -> bool:
-        """Submit a user turn. Always accepted — if a run is in flight on
-        this thread, the turn is queued and will fire when the current one
-        finishes. Returns True for "started immediately", False for "queued".
+        """Submit a user turn. Accepted unless the owner is at their
+        concurrent-run cap — if a run is in flight on this thread, the
+        turn is queued and will fire when the current one finishes.
+        Returns True for "started immediately", False for "queued".
+
+        Raises `RunLimitExceededError` when accepting would push the
+        owner past `max_concurrent_runs_per_user` active+queued turns
+        across all their threads (checked BEFORE any side effect).
+        Callers surface it without tearing down their transport: the WS
+        route emits an `error` event, the turns controller maps to 429.
+
+        `attachments` is the list of file ids the user attached for THIS
+        turn (already uploaded via the files endpoint). They get
+        carried to the AgentRunner and into the LangGraph config so
+        the preload middleware can prime the model's context.
 
         Note: the boolean used to mean "rejected" — it now means "queued".
         Callers don't error on False; the WS handler treats both as success.
         """
+        # Per-user concurrency cap. A user's in-flight total is every live
+        # handle they own plus every turn queued behind those handles —
+        # derived from `_handles` on each call so the count can never
+        # drift from the real lifecycle (teardown / queue-drain / queue-
+        # entry cancellation all update `_handles` already).
+        in_flight = sum(
+            1 + len(h.queue)
+            for h in self._handles.values()
+            if h.owner_id == owner_id
+        )
+        if in_flight >= self._max_runs_per_user:
+            self._logger.warning(
+                "run.limit_exceeded",
+                owner_id=owner_id,
+                thread_id=thread_id,
+                in_flight=in_flight,
+                limit=self._max_runs_per_user,
+            )
+            raise RunLimitExceededError(owner_id, self._max_runs_per_user)
+
         # Bump thread updated_at so the sidebar re-sorts.
         try:
             await self._thread_repo.touch(thread_id)
@@ -134,6 +184,7 @@ class RunManager:
             id=self._mint_turn_id(),
             content=content,
             enqueued_at=_now_iso(),
+            attachments=list(attachments or []),
         )
 
         if handle is not None:
@@ -261,7 +312,9 @@ class RunManager:
         try:
             await self._runner.run(
                 thread_id=handle.thread_id,
+                owner_id=handle.owner_id,
                 user_message=turn.content,
+                attachments=turn.attachments,
                 on_event=on_event,
             )
         except asyncio.CancelledError:

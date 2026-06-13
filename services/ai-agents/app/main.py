@@ -19,7 +19,8 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         # Boot order: open the agentic store (LangGraph Postgres Store +
-        # Checkpointer) -> Kafka producer -> consumer.
+        # Checkpointer) -> validate the agent registry against LiteLLM
+        # -> Kafka producer -> consumer.
         #
         # `AgenticStore.init()` opens the psycopg pool, then runs `setup()`
         # on both the Store and the Checkpointer — that's the entire
@@ -27,6 +28,24 @@ def create_app() -> FastAPI:
         agentic_store = container.resolve("AgenticStore")
         await agentic_store.init()
         logger.info("agentic_store.ready")
+
+        # Cross-check every registered agent's `accepts_modalities`
+        # against the underlying model's capabilities reported by
+        # LiteLLM. A mismatch is a config error — the service refuses
+        # to come up rather than surface it later as a confusing
+        # runtime failure when a user attaches an image to an agent
+        # whose underlying model can't see it.
+        registry = container.resolve("AgentRegistry")
+        litellm = container.resolve("LiteLLMClient")
+        await registry.validate_against(litellm)
+
+        # Bring up the vector store collection (idempotent). Qdrant
+        # backend issues a create_collection if missing + ensures the
+        # owner_id payload index. InMemory backend is a no-op. Failing
+        # here is a real misconfig (wrong URL, auth, etc.) — surface it
+        # at boot, not on the first kb_search call.
+        await container.resolve("IVectorStore").ensure_ready()
+        logger.info("vector_store.ready")
 
         publisher = container.resolve("EventPublisher")
         consumer = container.resolve("EventConsumer")
@@ -50,6 +69,12 @@ def create_app() -> FastAPI:
             # Close the Redis client — opened lazily on first use, so this
             # is a no-op if no agent has run yet.
             await container.resolve("Redis").aclose()
+            # Close the LiteLLM admin client (httpx). Also a no-op if
+            # nobody touched it (test boots, etc.).
+            await container.resolve("LiteLLMClient").aclose()
+            # Close the embedding client's httpx pool. Same no-op-if-
+            # unused semantics as the LiteLLM admin client above.
+            await container.resolve("IEmbeddingClient").aclose()
             await agentic_store.dispose()
 
     app = FastAPI(title="ai-agents-service", lifespan=lifespan)

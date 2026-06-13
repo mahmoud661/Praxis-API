@@ -16,6 +16,7 @@ file that ends up on disk, in compose env, and in process memory. Any host
 compromise or accidental commit leaks them.
 
 **Production answer:**
+
 - Use a real secrets store: **HashiCorp Vault**, **AWS/GCP/Azure Secrets
   Manager**, or **Doppler**.
 - Bake the secret reference into the deployment manifest, not the env file.
@@ -31,17 +32,15 @@ compromise or accidental commit leaks them.
 
 ## 2. Database backups
 
-**Status:** Postgres data lives in named docker volumes. Container loss =
-data loss.
+**Status: DONE (2026-06-13)** — `infra/docker-compose.prod.yml` ships a
+`prodrigestivill/postgres-backup-local:16` sidecar for each Postgres
+instance. Daily `pg_dump --format=custom`, 7-day/4-week/6-month rotation,
+stored in named volumes `postgres_auth_backups` / `postgres_agents_backups`.
+Restore drill documented in `docs/PRODUCTION.md`.
 
-**Production answer:**
-- **pgBackRest** sidecar that ships WAL + nightly full backups to S3.
-- Or, on managed Postgres (RDS / Cloud SQL / Crunchy), enable PITR.
-- Test restore quarterly — backups that haven't been restored aren't
-  backups.
-
-**Why deferred:** needs an external storage target (S3/GCS) and a
-schedule/cron environment.
+**Remaining gap:** for truly durable backups the volumes should be snapshotted
+to S3/GCS (e.g. via Restic + a cron job on the host). The current setup
+protects against accidental row deletion but not full-host failure.
 
 ---
 
@@ -52,6 +51,7 @@ behind `if: github.ref == 'refs/heads/main'`. So images don't get
 published until you actually run the workflow with the right token.
 
 **Production answer:**
+
 - Push to **GHCR** (already wired in `.github/workflows/backend-ci.yml`)
   or **ECR/GAR/ACR** based on cloud.
 - Tag with semantic version + git sha. Workflow already does
@@ -66,13 +66,19 @@ published until you actually run the workflow with the right token.
 ## 4. Kafka schema registry (Avro/Protobuf)
 
 **Status:** topics carry JSON envelopes. Producer schema and consumer
-schema are coordinated via `contracts/` markdown — there's no runtime
-enforcement.
+schema are coordinated via `contracts/` (topics.json + JSON Schema files).
+CI now runs `scripts/validate-contracts.mjs` (the `contracts` job), which
+enforces that every listed event has a structurally sane schema file —
+but that's a *static* check on the contract files. There's still no
+runtime enforcement: nothing stops a producer from publishing a payload
+that doesn't match its schema.
 
 **Risks:** producer changes a field name silently; consumer parses it as
-`undefined` and writes broken data downstream.
+`undefined` and writes broken data downstream. The CI gate catches
+missing/orphaned/malformed schemas, not payload drift at runtime.
 
 **Production answer:**
+
 - Run **Karapace** or **Confluent Schema Registry** as another container.
 - Switch producer/consumer to Avro or Protobuf and register schemas.
 - Add a CI gate: a schema change PR must pass the registry's
@@ -90,6 +96,7 @@ schema file and a code-generation step (`avro-tools` for Java/TS,
 account, and there's no password reset endpoint.
 
 **Production answer:**
+
 - Local dev: **MailHog** / **Mailpit** container (catches outbound mail
   in a UI).
 - Prod: **SES**, **Postmark**, or **Resend** with verified domain.
@@ -101,24 +108,23 @@ account, and there's no password reset endpoint.
   via a new topic `notification.commands.v1` consumed by a future
   notification service.
 
-**Why deferred:** scope is "build new service + new tables + new flow
-+ new UI" — a multi-day item.
+**Why deferred:** scope is "build new service, new tables, new flow,
+and new UI" — a multi-day item.
 
 ---
 
 ## 6. Multi-broker Kafka + replication
 
-**Status:** single broker, `replication-factor: 1`, in-memory KRaft
-metadata.
+**Status: DONE (2026-06-13)** — `infra/docker-compose.prod.yml` adds
+`kafka-2` and `kafka-3` brokers (3-node KRaft quorum), overrides
+`kafka` to drop its external listener, and sets
+`KAFKA_DEFAULT_REPLICATION_FACTOR=3` / `KAFKA_MIN_INSYNC_REPLICAS=2`.
+`kafka-init` creates topics with `rf=3 / min.insync.replicas=2` in prod.
 
-**Production answer:**
-- 3 brokers minimum. Each broker uses its own persistent volume.
-- `replication-factor: 3`, `min.insync.replicas: 2`.
-- Move outside Compose to a real orchestrator (Kafka on EKS via Strimzi,
-  or managed: MSK / Confluent Cloud).
-
-**Why deferred:** local dev with a single broker is fine; HA tuning
-belongs to whichever environment manifest you ship.
+**Remaining gap:** for a production SLA, migrate Kafka out of Compose to a
+managed service (MSK, Confluent Cloud) or a Kubernetes-based operator
+(Strimzi). The 3-broker compose setup is HA within a single host —
+it does not survive host failure.
 
 ---
 

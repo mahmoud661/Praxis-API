@@ -6,7 +6,14 @@ Layout in the Store:
 
     namespace = ("threads",)
     key       = thread_id   (whatever the client generated)
-    value     = { owner_id, title, created_at, updated_at }
+    value     = {
+        owner_id, title, created_at, updated_at,
+        config: { agent_id, tool_overrides, custom_system_prompt_id },
+    }
+
+`config` is the per-thread capability override layer (agent choice +
+tool toggles). Missing on threads that pre-date the field — `_to_view`
+defaults it to `EMPTY_CONFIG` so older threads keep working.
 
 `list_for_owner` does a server-side `filter={"owner_id": …}` so we don't
 pull every thread to filter in Python. The store's index over JSON values
@@ -17,8 +24,9 @@ runs at — if it ever gets hot we add a dedicated index.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
-from ....domain.dtos.thread_dto import ThreadView
+from ....domain.dtos.thread_dto import EMPTY_CONFIG, ThreadConfigView, ThreadView
 from ...agentic.agentic_store import AgenticStore
 
 _NAMESPACE = ("threads",)
@@ -37,12 +45,7 @@ class ThreadRepo:
         await self._agentic.store.aput(
             _NAMESPACE,
             thread.id,
-            {
-                "owner_id": thread.owner_id,
-                "title": thread.title,
-                "created_at": thread.created_at,
-                "updated_at": thread.updated_at,
-            },
+            _value_from_view(thread),
         )
 
     async def get(self, thread_id: str) -> ThreadView | None:
@@ -75,6 +78,66 @@ class ThreadRepo:
             {**item.value, "updated_at": _now_iso()},
         )
 
+    async def update_config(
+        self,
+        thread_id: str,
+        config: ThreadConfigView,
+    ) -> ThreadView | None:
+        """Persist a new `config` block, leaving every other field
+        untouched. Returns the refreshed view, or `None` when the
+        thread doesn't exist. Bumps `updated_at` so the sidebar
+        sort-by-recent surfaces the change."""
+        item = await self._agentic.store.aget(_NAMESPACE, thread_id)
+        if item is None:
+            return None
+        new_value = {
+            **item.value,
+            "config": _config_to_dict(config),
+            "updated_at": _now_iso(),
+        }
+        await self._agentic.store.aput(_NAMESPACE, thread_id, new_value)
+        return _to_view(thread_id, new_value)
+
+
+def _value_from_view(thread: ThreadView) -> dict[str, Any]:
+    return {
+        "owner_id": thread.owner_id,
+        "title": thread.title,
+        "created_at": thread.created_at,
+        "updated_at": thread.updated_at,
+        "config": _config_to_dict(thread.config),
+    }
+
+
+def _config_to_dict(config: ThreadConfigView) -> dict[str, Any]:
+    return {
+        "agent_id": config.agent_id,
+        "tool_overrides": dict(config.tool_overrides),
+        "custom_system_prompt_id": config.custom_system_prompt_id,
+    }
+
+
+def _config_from_dict(raw: object) -> ThreadConfigView:
+    if not isinstance(raw, dict):
+        return EMPTY_CONFIG
+    overrides = raw.get("tool_overrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    # Defensive coercion: anything non-bool gets dropped, so a
+    # malformed stored value can't crash the resolver later.
+    cleaned: dict[str, bool] = {
+        k: bool(v) for k, v in overrides.items() if isinstance(k, str)
+    }
+    agent_id = raw.get("agent_id")
+    prompt_id = raw.get("custom_system_prompt_id")
+    return ThreadConfigView(
+        agent_id=agent_id if isinstance(agent_id, str) else None,
+        tool_overrides=cleaned,
+        custom_system_prompt_id=(
+            prompt_id if isinstance(prompt_id, str) else None
+        ),
+    )
+
 
 def _to_view(key: str, value: dict[str, object]) -> ThreadView:
     return ThreadView(
@@ -83,4 +146,5 @@ def _to_view(key: str, value: dict[str, object]) -> ThreadView:
         title=str(value.get("title", "New conversation")),
         created_at=str(value.get("created_at", _now_iso())),
         updated_at=str(value.get("updated_at", _now_iso())),
+        config=_config_from_dict(value.get("config")),
     )

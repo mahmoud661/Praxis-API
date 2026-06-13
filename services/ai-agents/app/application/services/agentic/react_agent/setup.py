@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 from langchain.agents.middleware.types import AgentMiddleware
 from langgraph.prebuilt.tool_node import ToolNode
 
-from react_agent.nodes.sequential_tool_node import SequentialToolNode
 from react_agent.utils.tool_call_chain import chain_async_tool_call_wrappers, chain_tool_call_wrappers
 
 if TYPE_CHECKING:
@@ -61,7 +60,6 @@ def setup_tools(
     middleware: Sequence[AgentMiddleware[StateT_co, ContextT]],
     wrap_tool_call_wrapper: Callable | None,
     awrap_tool_call_wrapper: Callable | None,
-    use_sequential_tools: bool = False,
     section_manager=None,
     filter_tools_by_sections: bool = False,
 ) -> tuple[ToolNode | None, list[BaseTool | dict[str, Any]]]:
@@ -80,15 +78,15 @@ def setup_tools(
     regular_tools = [t for t in tools if not isinstance(t, dict)]
     available_tools = filtered_middleware_tools + regular_tools
 
-    tool_node_class = SequentialToolNode if use_sequential_tools else ToolNode
-
-    tool_node_kwargs = {
-        "tools": available_tools,
-        "wrap_tool_call": wrap_tool_call_wrapper,
-        "awrap_tool_call": awrap_tool_call_wrapper,
-    }
-
-    tool_node = tool_node_class(**tool_node_kwargs) if available_tools else None
+    tool_node = (
+        ToolNode(
+            tools=available_tools,
+            wrap_tool_call=wrap_tool_call_wrapper,
+            awrap_tool_call=awrap_tool_call_wrapper,
+        )
+        if available_tools
+        else None
+    )
 
     if tool_node:
         default_tools = list(tool_node.tools_by_name.values()) + built_in_tools
