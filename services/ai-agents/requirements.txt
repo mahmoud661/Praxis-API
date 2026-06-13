@@ -3,7 +3,7 @@ uvicorn[standard]==0.29.0
 pydantic==2.10.5
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
-python-multipart==0.0.18
+python-multipart==0.0.29
 aiokafka==0.10.0
 # LangGraph persistence — same patterns as the auth service's TypeORM
 # `synchronize`. Both call `setup()` on startup, no Alembic, no SQLAlchemy.
@@ -15,7 +15,7 @@ langgraph>=1.0.5
 # version we're on. The runtime serves via uvicorn directly, so we don't
 # need the CLI in the image.
 langgraph-checkpoint-postgres
-psycopg[binary,pool]==3.2.3
+psycopg[binary,pool]==3.3.4
 asyncpg>=0.31.0
 # LangChain — the agentic runtime uses these for `init_chat_model`,
 # middleware types, tool nodes. langchain-core resolves with langchain.
@@ -24,7 +24,7 @@ langchain-core>=1.2.4
 langchain-openai>=1.2.1
 # Redis — per-run event stream + per-user notifications pub/sub.
 redis[hiredis]==5.0.8
-structlog==24.1.0
+structlog==25.5.0
 httpx==0.27.0
 # Python 3.12 ships without `pkg_resources`; opentelemetry-instrumentation imports it.
 setuptools==70.0.0
@@ -33,7 +33,7 @@ setuptools==70.0.0
 # (FastAPI, psycopg, …) and patches them automatically.
 opentelemetry-distro==0.46b0
 opentelemetry-exporter-otlp-proto-http==1.25.0
-opentelemetry-instrumentation-fastapi==0.46b0
+opentelemetry-instrumentation-fastapi==0.63b1
 opentelemetry-instrumentation-psycopg==0.46b0
 opentelemetry-instrumentation-logging==0.46b0
 # PDF text extraction (pure-Python — no binary deps, ships in the wheel).
@@ -45,4 +45,4 @@ qdrant-client>=1.10.0
 # Test runner. Kept in the image so the Dockerfile can `RUN pytest` in the
 # build stage to gate startup on a passing unit-test suite.
 pytest==8.2.0
-pytest-asyncio==0.23.6
+pytest-asyncio==1.4.0
