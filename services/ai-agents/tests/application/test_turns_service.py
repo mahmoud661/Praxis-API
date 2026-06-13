@@ -110,11 +110,14 @@ class _FakeRunManager:
 
 
 class _NullLogger:
-    def info(self, *args: Any, **kwargs: Any) -> None: ...
+    def info(self, *args: Any, **kwargs: Any) -> None:
+        pass
 
-    def warning(self, *args: Any, **kwargs: Any) -> None: ...
+    def warning(self, *args: Any, **kwargs: Any) -> None:
+        pass
 
-    def error(self, *args: Any, **kwargs: Any) -> None: ...
+    def error(self, *args: Any, **kwargs: Any) -> None:
+        pass
 
 
 def _service(
