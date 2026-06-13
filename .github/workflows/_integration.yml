@@ -63,7 +63,7 @@ jobs:
 
       - name: Setup uv
         if: inputs.runtime == 'python'
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v7
 
       - name: Install (Node)
         if: inputs.runtime == 'node'
