@@ -6,6 +6,7 @@ import { Result } from "../../domain/shared/Result";
 import {
   ConflictException,
   DomainException,
+  TooManyAttemptsException,
   UnauthenticatedException,
 } from "../../domain/shared/DomainException";
 import { User } from "../../domain/entities/user.entity";
@@ -23,6 +24,11 @@ import {
 } from "../../domain/ports/EventPublisher";
 import { UNIT_OF_WORK, UnitOfWork } from "../../domain/ports/UnitOfWork";
 import { LOGGER, Logger } from "../../domain/ports/Logger";
+import {
+  LOGIN_ATTEMPT_TRACKER,
+  LoginAttemptTracker,
+} from "../../domain/ports/LoginAttemptTracker";
+import { AuditEntryInput } from "../../domain/IRepos/IAuditRepo";
 import {
   SignUpInput,
   LogInInput,
@@ -54,7 +60,21 @@ export class AuthService implements IAuthService {
     @inject(EVENT_PUBLISHER) private readonly publisher: EventPublisher,
     @inject(UNIT_OF_WORK) private readonly uow: UnitOfWork,
     @inject(LOGGER) private readonly logger: Logger,
+    @inject(LOGIN_ATTEMPT_TRACKER)
+    private readonly attempts: LoginAttemptTracker,
   ) {}
+
+  // Best-effort audit for paths outside the signup transaction. An audit
+  // outage must never fail the auth operation itself — but it must not be
+  // silent either, so failures land in the logs at warn level.
+  private auditSafe(entry: AuditEntryInput): Promise<void> {
+    return this.audit.record(entry).catch((err: unknown) => {
+      this.logger.warn("audit write failed", {
+        action: entry.action,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
 
   async signUp(
     input: SignUpInput,
@@ -112,6 +132,19 @@ export class AuthService implements IAuthService {
   ): Promise<Result<AuthOutput, DomainException>> {
     try {
       const email = Email.create(input.email);
+
+      // Lockout check BEFORE any user lookup or password verification: a
+      // locked account does no bcrypt work and leaks no timing signal. The
+      // message is identical to the bad-credentials one — only the status
+      // differs (429) — so the response never confirms the account exists.
+      if (await this.attempts.isLocked(email)) {
+        this.logger.warn("login rejected: account locked", {
+          email: email.value,
+          ip: ctx?.ip ?? null,
+        });
+        return Result.fail(new TooManyAttemptsException("Invalid credentials"));
+      }
+
       const user = await this.users.findByEmail(email);
 
       // Same response for "no user" and "wrong password" — no user enumeration.
@@ -122,21 +155,44 @@ export class AuthService implements IAuthService {
           PasswordHash.fromHashedValue(user.passwordHash),
         ));
       if (!user || !ok) {
+        // Failures count toward lockout for unknown emails too — otherwise
+        // the lockout behavior itself would reveal which accounts exist.
+        const failures = await this.attempts.recordFailure(email);
         // Visible in `docker logs` so ops can see brute-force attempts in real
         // time, on top of the audit row.
         this.logger.warn("login failed", {
           email: email.value,
           ip: ctx?.ip ?? null,
+          failures,
         });
-        await this.audit
-          .record({
-            action: "user.login.failed",
-            targetId: email.value,
+        await this.auditSafe({
+          action: "user.login.failed",
+          targetId: email.value,
+          ip: ctx?.ip ?? null,
+        });
+        // Did this failure trip the lock? Audit the engagement exactly once
+        // (later attempts short-circuit on the isLocked check above).
+        if (await this.attempts.isLocked(email)) {
+          this.logger.warn("login locked", {
+            email: email.value,
             ip: ctx?.ip ?? null,
-          })
-          .catch(() => undefined);
+            failures,
+          });
+          await this.auditSafe({
+            action: "user.login.locked",
+            targetId: email.value,
+            details: { failures },
+            ip: ctx?.ip ?? null,
+          });
+          return Result.fail(
+            new TooManyAttemptsException("Invalid credentials"),
+          );
+        }
         return Result.fail(new UnauthenticatedException("Invalid credentials"));
       }
+
+      // Successful login clears the failure counter.
+      await this.attempts.reset(email);
 
       const sessionId = await this.sessions.create({
         userId: user.id,
@@ -153,14 +209,12 @@ export class AuthService implements IAuthService {
           .catch(() => undefined);
       }
 
-      await this.audit
-        .record({
-          actorId: user.id,
-          action: "user.login",
-          targetId: user.id,
-          ip: ctx?.ip ?? null,
-        })
-        .catch(() => undefined);
+      await this.auditSafe({
+        actorId: user.id,
+        action: "user.login",
+        targetId: user.id,
+        ip: ctx?.ip ?? null,
+      });
 
       return Result.ok({ userId: user.id, email: user.email, sessionId });
     } catch (err) {
@@ -178,14 +232,12 @@ export class AuthService implements IAuthService {
     const session = await this.sessions.read(sessionId).catch(() => null);
     await this.sessions.destroy(sessionId);
     if (session) {
-      await this.audit
-        .record({
-          actorId: session.userId,
-          action: "user.logout",
-          targetId: session.userId,
-          ip: ctx?.ip ?? null,
-        })
-        .catch(() => undefined);
+      await this.auditSafe({
+        actorId: session.userId,
+        action: "user.logout",
+        targetId: session.userId,
+        ip: ctx?.ip ?? null,
+      });
     }
     return Result.ok(undefined);
   }

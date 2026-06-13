@@ -9,6 +9,8 @@ cross-user request gets a 404, no existence leak.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fastapi import Depends, File, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel
 
@@ -38,6 +40,24 @@ class FileResponse(BaseModel):
             size_bytes=f.size_bytes,
             created_at=f.created_at,
         )
+
+
+def content_disposition_for(mime_type: str, filename: str) -> str:
+    """Build a header-safe Content-Disposition for the bytes endpoint.
+
+    Images render inline (`<img>` thumbnails rely on it); everything else
+    downloads as an attachment so the browser never interprets uploaded
+    bytes as a document in our origin. The filename is user input — the
+    ASCII fallback replaces anything that could break out of the quoted
+    string (control chars, quotes, backslashes), and the RFC 5987
+    `filename*` form carries the exact name percent-encoded.
+    """
+    kind = "inline" if mime_type.startswith("image/") else "attachment"
+    fallback = (
+        "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in filename)
+        or "file"
+    )
+    return f"{kind}; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
 class FilesController:
@@ -122,9 +142,17 @@ class FilesController:
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail={"error": "NOT_FOUND"})
         # Cache for 1h — file bytes are immutable per id (re-upload
-        # gets a new id), so the browser can safely reuse.
+        # gets a new id), so the browser can safely reuse. nosniff pins
+        # the recorded MIME type; non-images download instead of
+        # rendering in-origin (see content_disposition_for).
         return Response(
             content=data,
             media_type=view.mime_type,
-            headers={"Cache-Control": "private, max-age=3600"},
+            headers={
+                "Cache-Control": "private, max-age=3600",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": content_disposition_for(
+                    view.mime_type, view.filename
+                ),
+            },
         )

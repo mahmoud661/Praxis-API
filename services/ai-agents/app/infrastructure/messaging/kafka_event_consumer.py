@@ -2,12 +2,35 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 from typing import Sequence
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 
 from ...domain.ports.event_consumer import EventConsumer, EventHandler
 from ...domain.ports.logger import Logger
+
+# Ceiling on a single retry delay. With the default base of 0.5s the
+# exponential curve hits this around attempt 7 — anything longer just
+# stalls the partition without improving the odds the handler recovers.
+_MAX_BACKOFF_SECONDS = 30.0
+
+
+def compute_backoff_delay(
+    *,
+    attempt: int,
+    backoff_seconds: float,
+    max_delay: float = _MAX_BACKOFF_SECONDS,
+) -> float:
+    """Exponential backoff with jitter for retry `attempt` (1-based).
+
+    base * 2^(attempt-1), scaled by a random factor in [0.5, 1.0) so a
+    fleet of consumers failing on the same dependency doesn't retry in
+    lockstep, capped at `max_delay`. Pure function — unit-testable
+    without a broker.
+    """
+    delay = backoff_seconds * (2 ** (attempt - 1)) * (0.5 + random.random() / 2)
+    return min(delay, max_delay)
 
 
 class KafkaEventConsumer(EventConsumer):
@@ -17,8 +40,8 @@ class KafkaEventConsumer(EventConsumer):
     For each message:
       1. Look up the handler by `event-name` header.
       2. Try the handler. On exception, retry up to `max_attempts` with
-         linear backoff (we control the loop so the broker doesn't keep
-         re-delivering the same offset).
+         exponential backoff + jitter (we control the loop so the broker
+         doesn't keep re-delivering the same offset).
       3. If still failing, write the original message to `<topic>.dlq`
          and continue. The consumer never gets stuck on a poison message.
 
@@ -76,6 +99,16 @@ class KafkaEventConsumer(EventConsumer):
             group=self._group_id,
             max_attempts=self._max_attempts,
         )
+        self._logger.warning(
+            "kafka.consumer.offset_reset_latest",
+            group=self._group_id,
+            detail=(
+                "auto_offset_reset='latest': a brand-new consumer group "
+                "starts at the END of each topic and skips any existing "
+                "backlog — an accidental group_id change silently drops "
+                "events published before the new group first connects."
+            ),
+        )
 
     async def stop(self) -> None:
         if self._task is not None:
@@ -122,7 +155,12 @@ class KafkaEventConsumer(EventConsumer):
                     error=str(err),
                 )
                 if attempt < self._max_attempts:
-                    await asyncio.sleep(self._backoff_seconds * attempt)
+                    await asyncio.sleep(
+                        compute_backoff_delay(
+                            attempt=attempt,
+                            backoff_seconds=self._backoff_seconds,
+                        )
+                    )
         return False
 
     async def _send_to_dlq(

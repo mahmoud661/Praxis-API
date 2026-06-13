@@ -24,6 +24,8 @@ string. Compaction continues; stubs just lose the caption flourish.
 
 from __future__ import annotations
 
+import asyncio
+
 from .ports import (
     AttachmentStore,
     CaptionModel,
@@ -114,7 +116,11 @@ async def _safe_extract_text(
         return ""
     try:
         data = await store.read_bytes(file_id=file_id, owner_id=owner_id)
-        return extractor.extract_text(data=data, mime_type=mime_type)
+        # Sync, CPU-bound extraction (PDF parsing) — keep it off the
+        # event loop; the extractor is intentionally not async.
+        return await asyncio.to_thread(
+            extractor.extract_text, data=data, mime_type=mime_type
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "caption.text_extract_failed", file_id=file_id, error=repr(exc)

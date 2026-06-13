@@ -5,16 +5,23 @@ What a connection does:
 
   1. Authenticate via `X-User-Id` (forwarded by the gateway). Reject with
      WS 1008 if missing.
-  2. Accept the socket.
-  3. **Replay** every entry currently in the thread's EventStream so a late
+  2. Claim a per-user connection slot (`WsConnectionRegistry`). Over the
+     cap: accept, then close with WS 1008 "connection limit reached" so
+     the browser can observe the code. The slot is released in a
+     `finally` on every disconnect path.
+  3. Accept the socket.
+  4. **Replay** every entry currently in the thread's EventStream so a late
      joiner catches up to live (including a client reconnecting after a
      transient network drop while a run is in flight).
-  4. Split into two concurrent tasks:
+  5. Split into two concurrent tasks:
        - reader: drain client messages — `{"content": "..."}` starts a
          new run via RunManager (if no run is active for this thread).
+         RunManager may reject with RunLimitExceededError (per-user
+         concurrent-run cap) — surfaced as an `error` event, socket stays
+         open.
        - writer: `XREAD BLOCK` the stream from the last replayed offset
          and forward each new event to the client.
-  5. On disconnect, cancel both tasks. The RunManager run is independent
+  6. On disconnect, cancel both tasks. The RunManager run is independent
      and keeps going — that's the whole point of decoupling.
 
 The route is **opaque to event content** — it forwards whatever the
@@ -27,11 +34,14 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import WebSocket, WebSocketDisconnect
+from starlette.status import WS_1008_POLICY_VIOLATION
 
+from ...application.services._errors import RunLimitExceededError
 from ...application.services.agentic.run_manager import RunManager
 from ...domain.ports.logger import Logger
 from ...infrastructure.cache.event_stream import EventStream
 from ..http.dependencies import ws_authenticate
+from ..http.ws_connection_registry import WsConnectionRegistry
 from .base_route import BaseRoute
 
 
@@ -49,11 +59,13 @@ class AgentsWsRoute(BaseRoute):
         run_manager: RunManager,
         event_stream: EventStream,
         logger: Logger,
+        ws_connections: WsConnectionRegistry,
     ) -> None:
         # Container resolves these by their annotation class names.
         self._runs = run_manager
         self._stream = event_stream
         self._logger = logger
+        self._ws_connections = ws_connections
         super().__init__()
 
     def _init_routes(self) -> None:
@@ -66,101 +78,138 @@ class AgentsWsRoute(BaseRoute):
         if user_id is None:
             return  # ws_authenticate already closed the socket
 
-        await ws.accept()
-
-        # --- replay: catch the client up to "now" --------------------------
-        last_id = "0"
-        for entry_id, event in await self._stream.replay(thread_id):
-            await ws.send_json(event)
-            last_id = entry_id
-
-        # --- live tail + inbound user input, concurrently -----------------
-        # We use a small queue + two tasks rather than nested awaits so a
-        # write to the WS doesn't block reading the next user message and
-        # vice versa.
-        async def reader() -> None:
-            while True:
-                msg = await ws.receive_json()
-                content = str(msg.get("content") or "").strip()
-                if not content:
-                    await ws.send_json(
-                        {
-                            "type": "error",
-                            "message": "expected {content: str}",
-                        }
-                    )
-                    continue
-                # Optional list of file ids the user attached for this
-                # turn. The frontend uploaded them via POST /v1/files
-                # beforehand and ships the ids here so the agent runtime
-                # can materialize them into context via the synthetic
-                # read_attachment pre-load (AttachmentPreloadMiddleware).
-                # Filter aggressively — anything that isn't a non-empty
-                # string is dropped before reaching the agent.
-                attachments_raw = msg.get("attachments") or []
-                attachments = [
-                    a for a in attachments_raw if isinstance(a, str) and a
-                ] if isinstance(attachments_raw, list) else []
-                # TEMP DEBUG — drop after attachment flow is confirmed.
-                self._logger.info(
-                    "ws.message.received",
-                    thread_id=thread_id,
-                    content_chars=len(content),
-                    attachments_raw=attachments_raw,
-                    attachments_parsed=attachments,
-                    msg_keys=list(msg.keys()),
-                )
-                # Always accepted — if a run is in flight the manager
-                # appends to its FIFO queue and emits `queue.changed` over
-                # the stream so the UI can render the pending turn.
-                await self._runs.start_run(
-                    thread_id=thread_id,
-                    owner_id=user_id,
-                    content=content,
-                    attachments=attachments,
-                )
-
-        async def writer() -> None:
-            nonlocal last_id
-            while True:
-                # `read_blocking` returns [] on timeout — loop and try again.
-                # When the thread isn't running, this just idles. When it
-                # IS running, entries flow as the RunManager XADDs.
-                batch = await self._stream.read_blocking(
-                    thread_id, last_id, block_ms=_READ_BLOCK_MS
-                )
-                for entry_id, event in batch:
-                    await ws.send_json(event)
-                    last_id = entry_id
-
-        reader_task = asyncio.create_task(reader())
-        writer_task = asyncio.create_task(writer())
-        try:
-            done, pending = await asyncio.wait(
-                {reader_task, writer_task},
-                return_when=asyncio.FIRST_EXCEPTION,
+        # Per-user connection cap. The slot is claimed BEFORE accept and
+        # freed in the outermost `finally` below, so every disconnect
+        # path — clean close, mid-replay exception, task crash — releases
+        # exactly once and the count can't leak.
+        if not self._ws_connections.try_acquire(user_id):
+            # Accept first, THEN close: closing a not-yet-accepted socket
+            # surfaces as an opaque HTTP 403 handshake failure, while a
+            # post-accept close delivers the 1008 code + reason to the
+            # browser's `close` event (the frontend ws-client passes the
+            # code to `onClose` once its retry budget runs out).
+            self._logger.warning(
+                "ws.connection_limit_reached",
+                user_id=user_id,
+                thread_id=thread_id,
             )
-            # Surface any non-disconnect exception to the logs by awaiting
-            # the completed task(s). WebSocketDisconnect is the common case.
-            for task in done:
-                exc = task.exception()
-                if exc and not isinstance(exc, WebSocketDisconnect):
-                    raise exc
-        except WebSocketDisconnect:
-            # Client closed the socket — the expected, normal outcome
-            # of any chat session. No diagnostic value in logging.
-            pass
-        finally:
-            for task in (reader_task, writer_task):
-                if not task.done():
-                    task.cancel()
+            await ws.accept()
+            await ws.close(
+                code=WS_1008_POLICY_VIOLATION,
+                reason="connection limit reached",
+            )
+            return
+
+        try:
+            await ws.accept()
+
+            # --- replay: catch the client up to "now" ----------------------
+            last_id = "0"
+            for entry_id, event in await self._stream.replay(thread_id):
+                await ws.send_json(event)
+                last_id = entry_id
+
+            # --- live tail + inbound user input, concurrently --------------
+            # We use a small queue + two tasks rather than nested awaits so a
+            # write to the WS doesn't block reading the next user message and
+            # vice versa.
+            async def reader() -> None:
+                while True:
+                    msg = await ws.receive_json()
+                    content = str(msg.get("content") or "").strip()
+                    if not content:
+                        await ws.send_json(
+                            {
+                                "type": "error",
+                                "message": "expected {content: str}",
+                            }
+                        )
+                        continue
+                    # Optional list of file ids the user attached for this
+                    # turn. The frontend uploaded them via POST /v1/files
+                    # beforehand and ships the ids here so the agent runtime
+                    # can materialize them into context via the synthetic
+                    # read_attachment pre-load (AttachmentPreloadMiddleware).
+                    # Filter aggressively — anything that isn't a non-empty
+                    # string is dropped before reaching the agent.
+                    attachments_raw = msg.get("attachments") or []
+                    attachments = [
+                        a for a in attachments_raw if isinstance(a, str) and a
+                    ] if isinstance(attachments_raw, list) else []
+                    # TEMP DEBUG — drop after attachment flow is confirmed.
+                    self._logger.info(
+                        "ws.message.received",
+                        thread_id=thread_id,
+                        content_chars=len(content),
+                        attachments_raw=attachments_raw,
+                        attachments_parsed=attachments,
+                        msg_keys=list(msg.keys()),
+                    )
+                    # Accepted unless the user is over their concurrent-run
+                    # cap — if a run is in flight on this thread the manager
+                    # appends to its FIFO queue and emits `queue.changed`
+                    # over the stream so the UI can render the pending turn.
                     try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        # Cleanup drain: the task was cancelled by the
-                        # line above; CancelledError is what we expect.
-                        # Any other error came from the task and has
-                        # nowhere useful to surface from cleanup.
-                        pass
-            # IMPORTANT: do NOT cancel the run. Disconnect ≠ cancel — the
-            # whole point is the run keeps going so the user can reconnect.
+                        await self._runs.start_run(
+                            thread_id=thread_id,
+                            owner_id=user_id,
+                            content=content,
+                            attachments=attachments,
+                        )
+                    except RunLimitExceededError as err:
+                        # Same envelope the frontend already renders for
+                        # run errors ({type: "error", message}) — surface
+                        # the rejection and keep the socket alive.
+                        await ws.send_json(
+                            {"type": "error", "message": str(err)}
+                        )
+
+            async def writer() -> None:
+                nonlocal last_id
+                while True:
+                    # `read_blocking` returns [] on timeout — loop and try
+                    # again. When the thread isn't running, this just idles.
+                    # When it IS running, entries flow as the RunManager
+                    # XADDs.
+                    batch = await self._stream.read_blocking(
+                        thread_id, last_id, block_ms=_READ_BLOCK_MS
+                    )
+                    for entry_id, event in batch:
+                        await ws.send_json(event)
+                        last_id = entry_id
+
+            reader_task = asyncio.create_task(reader())
+            writer_task = asyncio.create_task(writer())
+            try:
+                done, pending = await asyncio.wait(
+                    {reader_task, writer_task},
+                    return_when=asyncio.FIRST_EXCEPTION,
+                )
+                # Surface any non-disconnect exception to the logs by
+                # awaiting the completed task(s). WebSocketDisconnect is the
+                # common case.
+                for task in done:
+                    exc = task.exception()
+                    if exc and not isinstance(exc, WebSocketDisconnect):
+                        raise exc
+            except WebSocketDisconnect:
+                # Client closed the socket — the expected, normal outcome
+                # of any chat session. No diagnostic value in logging.
+                pass
+            finally:
+                for task in (reader_task, writer_task):
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except (asyncio.CancelledError, Exception):
+                            # Cleanup drain: the task was cancelled by the
+                            # line above; CancelledError is what we expect.
+                            # Any other error came from the task and has
+                            # nowhere useful to surface from cleanup.
+                            pass
+                # IMPORTANT: do NOT cancel the run. Disconnect ≠ cancel —
+                # the whole point is the run keeps going so the user can
+                # reconnect.
+        finally:
+            self._ws_connections.release(user_id)

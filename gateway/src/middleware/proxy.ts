@@ -2,6 +2,38 @@ import { createProxyMiddleware, Options, fixRequestBody } from "http-proxy-middl
 import type { RequestHandler, Request, Response } from "express";
 import type { ClientRequest, IncomingMessage } from "http";
 import type { Socket } from "net";
+import type { Logger } from "../ports/Logger";
+
+// Per-request mutation of the outbound proxy request. Extracted from the
+// `proxyReq` event handler so it's unit-testable with mock ClientRequest /
+// Request objects (the http-proxy-middleware event plumbing isn't).
+export function prepareProxyRequest(
+  proxyReq: ClientRequest,
+  req: Request,
+  opts: { requireAuth: boolean; forwardCookie?: boolean },
+): void {
+  // Defense in depth: identity headers are gateway-owned. Strip whatever
+  // the client sent BEFORE conditionally injecting from the resolved
+  // session — otherwise a forged `X-User-Id` would pass through untouched
+  // on requireAuth:false routes.
+  proxyReq.removeHeader("x-user-id");
+  proxyReq.removeHeader("x-user-email");
+  proxyReq.removeHeader("x-user-roles");
+  if (!opts.forwardCookie) {
+    proxyReq.removeHeader("cookie");
+  }
+  if (req.user) {
+    proxyReq.setHeader("X-User-Id", req.user.id);
+    proxyReq.setHeader("X-User-Email", req.user.email);
+    proxyReq.setHeader("X-User-Roles", req.user.roles.join(","));
+  } else if (opts.requireAuth) {
+    proxyReq.destroy();
+    return;
+  }
+  // express.json() has already consumed req.body. Replay it to the
+  // upstream — otherwise POST/PUT/PATCH arrive with an empty body.
+  fixRequestBody(proxyReq, req);
+}
 
 // Builds a proxy that forwards to a downstream internal service.
 //
@@ -16,6 +48,7 @@ export function makeServiceProxy(opts: {
   pathRewrite?: Options["pathRewrite"];
   requireAuth: boolean;
   forwardCookie?: boolean;
+  logger: Logger;
 }) {
   return createProxyMiddleware({
     target: opts.target,
@@ -26,26 +59,17 @@ export function makeServiceProxy(opts: {
     timeout: 30_000,
     on: {
       proxyReq: (proxyReq: ClientRequest, req: Request) => {
-        if (!opts.forwardCookie) {
-          proxyReq.removeHeader("cookie");
-        }
-        if (req.user) {
-          proxyReq.setHeader("X-User-Id", req.user.id);
-          proxyReq.setHeader("X-User-Email", req.user.email);
-          proxyReq.setHeader("X-User-Roles", req.user.roles.join(","));
-        } else if (opts.requireAuth) {
-          proxyReq.destroy();
-          return;
-        }
-        // express.json() has already consumed req.body. Replay it to the
-        // upstream — otherwise POST/PUT/PATCH arrive with an empty body.
-        fixRequestBody(proxyReq, req);
+        prepareProxyRequest(proxyReq, req, opts);
       },
       error: (err, _req, res) => {
+        // Log the real failure server-side; clients get a generic body so
+        // upstream internals (hostnames, connect errors) never leak.
+        opts.logger.error("proxy upstream error", {
+          target: opts.target,
+          err: err.message,
+        });
         if ("status" in (res as Response)) {
-          (res as Response)
-            .status(502)
-            .json({ error: "BAD_GATEWAY", detail: err.message });
+          (res as Response).status(502).json({ error: "BAD_GATEWAY" });
         }
       },
     },

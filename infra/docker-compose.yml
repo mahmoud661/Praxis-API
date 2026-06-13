@@ -48,6 +48,7 @@ volumes:
   kafka_data:
   redis_data:
   prometheus_data:
+  alertmanager_data:
   grafana_data:
   loki_data:
   postgres_auth_data:
@@ -125,20 +126,33 @@ services:
     <<: *platform-defaults
 
   # One-shot init: declares topics + DLQs, then exits 0.
+  # Replication is env-driven so the prod overlay can raise it without
+  # forking this block: dev defaults to rf=1 / min-ISR=1 (single broker);
+  # docker-compose.prod.yml sets 3 / 2. The custom entrypoint bypasses the
+  # image's KAFKA_* env-to-server-properties translation, so these are
+  # plain shell vars here. (contracts/topics.json's replicationFactor is
+  # documentation — nothing reads it at runtime; this env is the source
+  # of truth per environment.)
   kafka-init:
     image: apache/kafka:3.7.1
     container_name: kafka-init
     networks: [backend_platform]
     depends_on:
       kafka: { condition: service_healthy }
+    environment:
+      KAFKA_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR:-1}
+      KAFKA_MIN_INSYNC_REPLICAS: ${KAFKA_MIN_INSYNC_REPLICAS:-1}
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         set -e
-        echo "Creating topics..."
+        RF="$${KAFKA_REPLICATION_FACTOR:-1}"
+        MIN_ISR="$${KAFKA_MIN_INSYNC_REPLICAS:-1}"
+        echo "Creating topics (replication-factor=$$RF, min.insync.replicas=$$MIN_ISR)..."
         for topic in auth.events.v1 agents.events.v1 auth.events.v1.dlq agents.events.v1.dlq; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
-            --topic "$$topic" --partitions 3 --replication-factor 1
+            --topic "$$topic" --partitions 3 --replication-factor "$$RF" \
+            --config min.insync.replicas="$$MIN_ISR"
         done
         echo "Topics ready:"
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
@@ -259,11 +273,35 @@ services:
       - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--web.enable-lifecycle"
+    depends_on: [alertmanager]
+    <<: *platform-defaults
+
+  # Receives fired alerts from Prometheus; groups, dedupes, and delivers
+  # them. Local config ships a placeholder webhook receiver — swap in
+  # Slack/PagerDuty for production (see alertmanager/alertmanager.yml).
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    networks: [backend_platform]
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9093/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     <<: *platform-defaults
 
   # Centralized log store. Promtail tails Docker container stdout/stderr
@@ -420,7 +458,6 @@ services:
       AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
       AI_AGENTS_SERVICE_URL: ${AI_AGENTS_SERVICE_URL}
       # Resilience
-      PROXY_RETRY_COUNT: ${PROXY_RETRY_COUNT:-2}
       PROXY_CB_THRESHOLD: ${PROXY_CB_THRESHOLD:-5}
       PROXY_CB_RESET_MS: ${PROXY_CB_RESET_MS:-15000}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}

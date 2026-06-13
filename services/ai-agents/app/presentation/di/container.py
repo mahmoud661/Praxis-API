@@ -58,6 +58,7 @@ from ..controllers.files_controller import FilesController
 from ..controllers.health_controller import HealthController
 from ..controllers.threads_controller import ThreadsController
 from ..controllers.turns_controller import TurnsController
+from ..http.ws_connection_registry import WsConnectionRegistry
 # Routes are auto-mounted by `mount_routes()` scanning presentation/routes/.
 # Importing each module triggers its `BaseRoute` subclass registration;
 # binding the classes into the `_AUTO_MOUNT_ROUTES` tuple below makes the
@@ -307,7 +308,8 @@ def register_dependencies() -> Container:
 
     # RunManager: owns the background asyncio.Task per thread, the running
     # set in Redis, and the notifications pub/sub. The Task survives WS
-    # disconnects; clients reconnect and replay the EventStream.
+    # disconnects; clients reconnect and replay the EventStream. The cap
+    # bounds active+queued turns per user across all their threads.
     container.register(
         "RunManager",
         RunManager(
@@ -316,7 +318,16 @@ def register_dependencies() -> Container:
             redis,
             logger,
             container.resolve("IThreadRepo"),
+            max_concurrent_runs_per_user=env.max_concurrent_runs_per_user,
         ),
+    )
+
+    # WS connection registry — per-user cap on open agents-WS sockets.
+    # In-memory is authoritative because the service is single-process;
+    # AgentsWsRoute resolves it by annotation class name.
+    container.register(
+        "WsConnectionRegistry",
+        WsConnectionRegistry(env.max_ws_connections_per_user),
     )
 
     publisher: EventPublisher = KafkaEventPublisher(

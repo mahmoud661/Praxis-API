@@ -53,6 +53,13 @@ function main(): void {
         rejectUpgrade(socket, 401);
         return;
       }
+      // Strip any client-supplied identity headers first — the assignments
+      // below only overwrite unconditionally for x-user-id, so a forged
+      // x-user-email/x-user-roles would otherwise survive when the session
+      // lacks those fields. Same defense-in-depth as the HTTP proxy.
+      delete req.headers["x-user-id"];
+      delete req.headers["x-user-email"];
+      delete req.headers["x-user-roles"];
       // Inject identity headers — same contract as the HTTP proxy
       // (downstream `X-User-Id` etc.) so ws_authenticate on ai-agents sees them.
       req.headers["x-user-id"] = session.userId;

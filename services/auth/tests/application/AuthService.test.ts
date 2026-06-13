@@ -3,15 +3,17 @@ import "reflect-metadata";
 import { AuthService } from "../../src/application/services/auth.service";
 import {
   ConflictException,
+  TooManyAttemptsException,
   UnauthenticatedException,
 } from "../../src/domain/shared/DomainException";
 import {
   CapturingAuditRepo,
   CapturingEventPublisher,
+  CapturingLogger,
+  FakeLoginAttemptTracker,
   InMemorySessionStore,
   InMemoryUserRepo,
   NoOpUnitOfWork,
-  SilentLogger,
   StubPasswordHasher,
 } from "../helpers/fakes";
 
@@ -21,6 +23,8 @@ function build(): {
   sessions: InMemorySessionStore;
   publisher: CapturingEventPublisher;
   hasher: StubPasswordHasher;
+  attempts: FakeLoginAttemptTracker;
+  logger: CapturingLogger;
   service: AuthService;
 } {
   const users = new InMemoryUserRepo();
@@ -28,9 +32,11 @@ function build(): {
   const sessions = new InMemorySessionStore();
   const publisher = new CapturingEventPublisher();
   const hasher = new StubPasswordHasher();
+  const attempts = new FakeLoginAttemptTracker();
+  const logger = new CapturingLogger();
   // Constructor order matches AuthService: users, audit, sessions, hasher,
-  // publisher, uow, logger. (The @inject tokens only matter when resolved
-  // through the container; here we wire positionally.)
+  // publisher, uow, logger, attempts. (The @inject tokens only matter when
+  // resolved through the container; here we wire positionally.)
   const service = new AuthService(
     users,
     audit,
@@ -38,9 +44,10 @@ function build(): {
     hasher,
     publisher,
     new NoOpUnitOfWork(),
-    new SilentLogger(),
+    logger,
+    attempts,
   );
-  return { users, audit, sessions, publisher, hasher, service };
+  return { users, audit, sessions, publisher, hasher, attempts, logger, service };
 }
 
 describe("AuthService.signUp", () => {
@@ -155,6 +162,164 @@ describe("AuthService.logIn", () => {
     });
     expect(result.isOk()).toBe(true);
   });
+
+  it("rotates the session on re-login: destroys the old one, issues a new one", async () => {
+    const first = await ctx.service.logIn({
+      email: "alice@example.com",
+      password: "correcthorsebattery",
+    });
+    const oldSid = first.getValue().sessionId;
+
+    const second = await ctx.service.logIn(
+      { email: "alice@example.com", password: "correcthorsebattery" },
+      { oldSessionId: oldSid },
+    );
+
+    const newSid = second.getValue().sessionId;
+    expect(newSid).not.toBe(oldSid);
+    expect(ctx.sessions.sessions.get(oldSid)).toBeUndefined();
+    expect(ctx.sessions.sessions.get(newSid)?.email).toBe("alice@example.com");
+  });
+
+  it("still succeeds when the audit write fails, but warns with the action name", async () => {
+    ctx.audit.shouldFail = true;
+
+    const result = await ctx.service.logIn({
+      email: "alice@example.com",
+      password: "correcthorsebattery",
+    });
+
+    expect(result.isOk()).toBe(true);
+    const warns = ctx.logger.byLevel("warn");
+    const auditWarn = warns.find((w) => w.msg === "audit write failed");
+    expect(auditWarn).toBeDefined();
+    expect(auditWarn?.ctx?.action).toBe("user.login");
+  });
+
+  it("does not fail a rejected login when the audit write fails either", async () => {
+    ctx.audit.shouldFail = true;
+
+    const result = await ctx.service.logIn({
+      email: "alice@example.com",
+      password: "wrong-password-here",
+    });
+
+    expect(result.isFail()).toBe(true);
+    expect(result.getError()).toBeInstanceOf(UnauthenticatedException);
+    const auditWarn = ctx.logger
+      .byLevel("warn")
+      .find((w) => w.msg === "audit write failed");
+    expect(auditWarn?.ctx?.action).toBe("user.login.failed");
+  });
+});
+
+describe("AuthService.logIn — account lockout", () => {
+  let ctx: ReturnType<typeof build>;
+  beforeEach(async () => {
+    ctx = build();
+    await ctx.service.signUp({
+      email: "alice@example.com",
+      password: "correcthorsebattery",
+    });
+    ctx.sessions.sessions.clear();
+    ctx.audit.entries.length = 0;
+  });
+
+  async function failLogin(email = "alice@example.com") {
+    return ctx.service.logIn({ email, password: "wrong-password-here" });
+  }
+
+  it("locks after 5 failures: 1-4 are 401-shaped, 5+ are 429-shaped", async () => {
+    for (let i = 0; i < 4; i++) {
+      const r = await failLogin();
+      expect(r.getError()).toBeInstanceOf(UnauthenticatedException);
+    }
+    // 5th failure trips the lock — already answered as TooManyAttempts.
+    const fifth = await failLogin();
+    expect(fifth.getError()).toBeInstanceOf(TooManyAttemptsException);
+
+    // Subsequent attempts short-circuit on the lock.
+    const sixth = await failLogin();
+    expect(sixth.getError()).toBeInstanceOf(TooManyAttemptsException);
+  });
+
+  it("lockout response carries the same generic message as bad credentials", async () => {
+    const failed = await failLogin();
+    for (let i = 0; i < 4; i++) await failLogin();
+    const locked = await failLogin();
+
+    expect(locked.getError()).toBeInstanceOf(TooManyAttemptsException);
+    expect(locked.getError().message).toBe(failed.getError().message);
+  });
+
+  it("audits 'user.login.locked' exactly once, when the lock engages", async () => {
+    for (let i = 0; i < 7; i++) await failLogin();
+
+    const lockedEntries = ctx.audit.entries.filter(
+      (e) => e.action === "user.login.locked",
+    );
+    expect(lockedEntries).toHaveLength(1);
+    expect(lockedEntries[0].targetId).toBe("alice@example.com");
+    // Failed attempts BEFORE the lock are audited; locked rejections are not.
+    expect(
+      ctx.audit.entries.filter((e) => e.action === "user.login.failed"),
+    ).toHaveLength(5);
+  });
+
+  it("rejects a locked account even with the CORRECT password, without verifying it", async () => {
+    for (let i = 0; i < 5; i++) await failLogin();
+    ctx.hasher.verifyCalls = 0;
+
+    const r = await ctx.service.logIn({
+      email: "alice@example.com",
+      password: "correcthorsebattery",
+    });
+
+    expect(r.getError()).toBeInstanceOf(TooManyAttemptsException);
+    expect(ctx.hasher.verifyCalls).toBe(0); // lock checked BEFORE verification
+    expect(ctx.sessions.sessions.size).toBe(0);
+  });
+
+  it("locks unknown emails identically — lockout does not enumerate accounts", async () => {
+    for (let i = 0; i < 4; i++) {
+      const r = await failLogin("ghost@nowhere.tld");
+      expect(r.getError()).toBeInstanceOf(UnauthenticatedException);
+    }
+    const locked = await failLogin("ghost@nowhere.tld");
+    expect(locked.getError()).toBeInstanceOf(TooManyAttemptsException);
+  });
+
+  it("successful login resets the failure counter", async () => {
+    for (let i = 0; i < 3; i++) await failLogin();
+    expect(ctx.attempts.failures.get("alice@example.com")).toBe(3);
+
+    const ok = await ctx.service.logIn({
+      email: "alice@example.com",
+      password: "correcthorsebattery",
+    });
+    expect(ok.isOk()).toBe(true);
+    expect(ctx.attempts.failures.has("alice@example.com")).toBe(false);
+
+    // The window starts fresh: 4 more failures still answer 401, not 429.
+    for (let i = 0; i < 4; i++) {
+      const r = await failLogin();
+      expect(r.getError()).toBeInstanceOf(UnauthenticatedException);
+    }
+  });
+
+  it("counts failures per account, not globally", async () => {
+    await ctx.service.signUp({
+      email: "bob@example.com",
+      password: "correcthorsebattery",
+    });
+    for (let i = 0; i < 5; i++) await failLogin("alice@example.com");
+
+    const bob = await ctx.service.logIn({
+      email: "bob@example.com",
+      password: "correcthorsebattery",
+    });
+    expect(bob.isOk()).toBe(true);
+  });
 });
 
 describe("AuthService.logOut", () => {
@@ -199,6 +364,17 @@ describe("AuthService.getCurrentUser", () => {
     const r = await ctx.service.getCurrentUser(signupSessionId);
     expect(r.isOk()).toBe(true);
     expect(r.getValue().email).toBe("a@b.co");
+  });
+
+  it("refreshes the session TTL on every valid read (sliding expiry)", async () => {
+    await ctx.service.getCurrentUser(signupSessionId);
+    await ctx.service.getCurrentUser(signupSessionId);
+    expect(ctx.sessions.refreshed).toEqual([signupSessionId, signupSessionId]);
+  });
+
+  it("does not refresh when the session is missing", async () => {
+    await ctx.service.getCurrentUser("sid-does-not-exist");
+    expect(ctx.sessions.refreshed).toHaveLength(0);
   });
 
   it("fails when no session id is provided", async () => {

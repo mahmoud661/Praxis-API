@@ -52,4 +52,23 @@ describe("User entity", () => {
       expect(user.hasRole("nope")).toBe(false);
     });
   });
+
+  describe("toJSON", () => {
+    it("omits the password hash from serialized output", () => {
+      const user = User.register({
+        id: UserId.generate(),
+        email: Email.create("a@b.co"),
+        passwordHash: PasswordHash.fromHashedValue(okHash),
+      });
+
+      const json = user.toJSON();
+      expect(json).not.toHaveProperty("passwordHash");
+      expect(json.email).toBe("a@b.co");
+      expect(json.id).toBe(user.id);
+
+      // The guard rail that matters: JSON.stringify (what Express uses)
+      // must never ship the hash.
+      expect(JSON.stringify(user)).not.toContain(okHash);
+    });
+  });
 });

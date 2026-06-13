@@ -98,6 +98,22 @@ jobs:
           sed -i "s/^SESSION_SECRET=.*/SESSION_SECRET=$(openssl rand -hex 32)/" .env
           docker compose -f infra/docker-compose.yml --env-file .env config --quiet
 
+  # ----- Event contracts ------------------------------------------------
+  # Structural check of contracts/: every topic in topics.json declares
+  # partitions/replication and every listed event has a sane JSON schema.
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Validate event contracts
+        run: node scripts/validate-contracts.mjs
+
   # ----- Gate ----------------------------------------------------------
   # A single job that depends on the important ones; branch protection
   # can require *just* `ci-success` instead of every individual matrix
@@ -112,6 +128,7 @@ jobs:
       - build-auth
       - build-ai-agents
       - compose-config
+      - contracts
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate result
@@ -125,7 +142,8 @@ jobs:
                    '${{ needs.build-gateway.result }}' \
                    '${{ needs.build-ai-agents.result }}' \
                    '${{ needs.build-auth.result }}' \
-                   '${{ needs.compose-config.result }}'; do
+                   '${{ needs.compose-config.result }}' \
+                   '${{ needs.contracts.result }}'; do
             case "$r" in
               success|skipped) ;;
               *) failed=1 ;;

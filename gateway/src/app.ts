@@ -20,6 +20,27 @@ import {
   makeCircuitBreakerMiddleware,
 } from "./middleware/circuit-breaker";
 
+// Global error handler — Express recognises it by the 4-arg signature.
+// Logs the real error via the Logger port; clients get a generic body so
+// `err.message` (stack frames, internal hostnames) never leaks. Exported
+// as a factory so tests can exercise it directly (no supertest dep).
+export function makeErrorHandler(logger: Logger): express.ErrorRequestHandler {
+  return (err, req, res, next) => {
+    logger.error("unhandled error", {
+      method: req.method,
+      path: req.path,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    // If headers already went out, the default handler must finish the
+    // response — we can't write a JSON body on top of a half-sent reply.
+    if (res.headersSent) {
+      next(err);
+      return;
+    }
+    res.status(500).json({ error: "INTERNAL" });
+  };
+}
+
 export interface GatewayHandles {
   app: express.Express;
   /** WebSocket proxy for `/v1/ws/*` → ai-agents-service `/ws/*`. main.ts
@@ -117,6 +138,7 @@ export function buildApp(deps: {
       requireAuth: false,
       forwardCookie: true,
       pathRewrite: reprefix("/auth"),
+      logger,
     }),
   );
 
@@ -132,6 +154,7 @@ export function buildApp(deps: {
       target: config.AI_AGENTS_SERVICE_URL,
       requireAuth: true,
       pathRewrite: reprefix("/agents"),
+      logger,
     }),
   );
 
@@ -147,6 +170,7 @@ export function buildApp(deps: {
       target: config.AI_AGENTS_SERVICE_URL,
       requireAuth: true,
       pathRewrite: reprefix("/threads"),
+      logger,
     }),
   );
 
@@ -165,6 +189,7 @@ export function buildApp(deps: {
       target: config.AI_AGENTS_SERVICE_URL,
       requireAuth: true,
       pathRewrite: reprefix("/capabilities"),
+      logger,
     }),
   );
 
@@ -183,6 +208,7 @@ export function buildApp(deps: {
       target: config.AI_AGENTS_SERVICE_URL,
       requireAuth: true,
       pathRewrite: reprefix("/files"),
+      logger,
     }),
   );
 
@@ -208,6 +234,7 @@ export function buildApp(deps: {
       requireAuth: false,
       forwardCookie: true,
       pathRewrite: reprefix("/auth"),
+      logger,
     }),
   );
   app.use(
@@ -222,6 +249,7 @@ export function buildApp(deps: {
       target: config.AI_AGENTS_SERVICE_URL,
       requireAuth: true,
       pathRewrite: reprefix("/agents"),
+      logger,
     }),
   );
 
@@ -243,6 +271,9 @@ export function buildApp(deps: {
   });
 
   app.use((_req, res) => res.status(404).json({ error: "NOT_FOUND" }));
+
+  // Last in the chain: anything that called next(err) lands here.
+  app.use(makeErrorHandler(logger));
 
   logger.info("gateway routes wired", {
     versions: ["v1"],

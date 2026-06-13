@@ -27,16 +27,22 @@ import path from "path";
 import Redis from "ioredis";
 
 import { ENV_TOKEN, Env, loadEnv } from "../../infrastructure/config/Env";
-import { REDIS_TOKEN } from "../../infrastructure/config/tokens";
+import {
+  DATA_SOURCE_TOKEN,
+  REDIS_TOKEN,
+} from "../../infrastructure/config/tokens";
+import { AppDataSource } from "../../infrastructure/database/data-source";
 import { LOGGER } from "../../domain/ports/Logger";
 import { SESSION_STORE } from "../../domain/ports/SessionStore";
 import { PASSWORD_HASHER } from "../../domain/ports/PasswordHasher";
 import { EVENT_PUBLISHER } from "../../domain/ports/EventPublisher";
 import { UNIT_OF_WORK } from "../../domain/ports/UnitOfWork";
+import { LOGIN_ATTEMPT_TRACKER } from "../../domain/ports/LoginAttemptTracker";
 
 import { PinoLoggerAdapter } from "../../infrastructure/logging/PinoLoggerAdapter";
 import { RedisSessionStore } from "../../infrastructure/sessions/RedisSessionStore";
 import { BcryptPasswordHasher } from "../../infrastructure/security/BcryptPasswordHasher";
+import { RedisLoginAttemptTracker } from "../../infrastructure/security/RedisLoginAttemptTracker";
 import { OutboxEventPublisher } from "../../infrastructure/messaging/OutboxEventPublisher";
 import { OutboxPoller } from "../../infrastructure/messaging/OutboxPoller";
 import { TypeOrmUnitOfWork } from "../../infrastructure/database/TypeOrmUnitOfWork";
@@ -72,11 +78,14 @@ export async function registerDependencies(): Promise<Env> {
   const env = loadEnv();
   container.registerInstance<Env>(ENV_TOKEN, env);
 
-  // Third-party client singleton.
+  // Third-party client singletons. The DataSource instance is registered
+  // here (initialized later in main.ts) so workers like the OutboxPoller can
+  // receive it through DI instead of importing the module-level singleton.
   container.registerInstance<Redis>(
     REDIS_TOKEN,
     new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3 }),
   );
+  container.registerInstance(DATA_SOURCE_TOKEN, AppDataSource);
 
   // Infrastructure adapters (not repos/services) — explicit singletons.
   container.registerSingleton(LOGGER, PinoLoggerAdapter);
@@ -84,6 +93,7 @@ export async function registerDependencies(): Promise<Env> {
   container.registerSingleton(PASSWORD_HASHER, BcryptPasswordHasher);
   container.registerSingleton(EVENT_PUBLISHER, OutboxEventPublisher);
   container.registerSingleton(UNIT_OF_WORK, TypeOrmUnitOfWork);
+  container.registerSingleton(LOGIN_ATTEMPT_TRACKER, RedisLoginAttemptTracker);
 
   // Repositories + services — discovered and bound by naming convention.
   await registerByConvention(

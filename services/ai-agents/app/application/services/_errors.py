@@ -48,6 +48,22 @@ class InvalidThreadConfigError(Exception):
     with the message intact so the frontend can surface it."""
 
 
+class RunLimitExceededError(Exception):
+    """Raised by RunManager.start_run when accepting the turn would push
+    the caller past `max_concurrent_runs_per_user` (active + queued,
+    across all their threads). The WS route surfaces it as an `error`
+    event without dropping the socket; the turns controller maps it
+    to 429."""
+
+    def __init__(self, owner_id: str, limit: int) -> None:
+        super().__init__(
+            f"concurrent run limit reached ({limit}); wait for a run "
+            f"to finish or cancel one before starting another"
+        )
+        self.owner_id = owner_id
+        self.limit = limit
+
+
 class FileNotFoundError(AttachmentNotFoundError):  # noqa: A001 — domain term shadows builtin intentionally
     """Raised when a file id doesn't exist OR isn't owned by the
     caller. Controllers map both to 404 — we don't leak existence.

@@ -11,7 +11,13 @@
     "clean": "rimraf dist",
     "lint": "eslint \"src/**/*.ts\"",
     "test": "vitest run",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "typeorm": "typeorm-ts-node-commonjs -d src/infrastructure/database/data-source.ts",
+    "migration:generate": "npm run typeorm -- migration:generate",
+    "migration:run": "npm run typeorm -- migration:run",
+    "migration:revert": "npm run typeorm -- migration:revert",
+    "migration:show": "npm run typeorm -- migration:show",
+    "migration:run:prod": "typeorm -d dist/infrastructure/database/data-source.js migration:run"
   },
   "dependencies": {
     "express": "^4.19.2",

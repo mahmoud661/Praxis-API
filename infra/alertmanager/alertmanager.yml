@@ -1,0 +1,24 @@
+# Alertmanager — routing + delivery for alerts fired by Prometheus
+# (rules live in infra/prometheus/alerts.yml).
+
+route:
+  receiver: default
+  # One notification per alert name per service, not one per evaluation.
+  group_by: [alertname, exported_job]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  # PLACEHOLDER — replace with Slack/PagerDuty in production.
+  # Local dev has nowhere to deliver to, so this posts to a webhook that
+  # doesn't exist; delivery failures show up in `docker logs alertmanager`
+  # and alerts remain visible in the UI at :9093 either way.
+  #
+  # Production examples:
+  #   slack_configs:     [{ api_url: <secret>, channel: "#alerts" }]
+  #   pagerduty_configs: [{ routing_key: <secret> }]
+  - name: default
+    webhook_configs:
+      - url: "http://localhost:9999/alerts"
+        send_resolved: true

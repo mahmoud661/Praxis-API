@@ -22,6 +22,8 @@ Auto-bound to the DI token `"IKnowledgeService"`.
 
 from __future__ import annotations
 
+import asyncio
+
 from ...domain.dtos.knowledge_dto import KnowledgeChunk, KnowledgeSearchHit
 from ...domain.ports.document_extractor import IDocumentExtractor
 from ...domain.ports.embedding_client import IEmbeddingClient
@@ -58,7 +60,15 @@ class KnowledgeService:
         """Extract text → chunk → embed → upsert. Returns the number of
         chunks written. Zero is a normal, non-error result for files
         the extractor doesn't index (images, audio, empty PDFs)."""
-        text = self._extract_or_skip(file_id=file_id, mime_type=mime_type, data=data)
+        # `extract_text` is sync + CPU-bound (PDF parsing) by design —
+        # thread it off the event loop so a big upload can't stall
+        # every other request while it parses.
+        text = await asyncio.to_thread(
+            self._extract_or_skip,
+            file_id=file_id,
+            mime_type=mime_type,
+            data=data,
+        )
         if not text:
             return 0
 

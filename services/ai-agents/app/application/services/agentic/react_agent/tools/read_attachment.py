@@ -32,6 +32,7 @@ Constructed via `make_read_attachment_tool(store, extractor, lookup)`
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Annotated, Any
 
@@ -212,9 +213,13 @@ async def materialize_attachment(
             )
         return [block]
 
-    # Text-bearing files → extract + paginate.
+    # Text-bearing files → extract + paginate. Extraction is sync +
+    # CPU-bound (PDF parsing) by design — see the extractor's docstring
+    # — so the async boundary here threads it off the event loop.
     try:
-        text = extractor.extract_text(data=data, mime_type=file.mime_type)
+        text = await asyncio.to_thread(
+            extractor.extract_text, data=data, mime_type=file.mime_type
+        )
     except UnsupportedContentError:
         # Not an error — audio, video, archives, binaries… anything the
         # extractor can't turn into text. The turn must not break and

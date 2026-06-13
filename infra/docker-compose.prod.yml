@@ -1,0 +1,294 @@
+# Production OVERRIDE. Never used alone — always merged over the base file:
+#
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.prod.yml \
+#     --env-file .env.prod <cmd>
+#
+# (or `make up-prod` / `make prod-config`). See docs/PRODUCTION.md.
+#
+# What this overlay changes:
+#   1. Network surface: every platform service drops its host-published
+#      ports (`ports: !override []` — the !override tag is required because
+#      plain compose merge UNIONS port lists instead of replacing them).
+#      Caddy is the only published entry point; it terminates TLS and
+#      reverse-proxies to gateway:3000 over the docker network (see
+#      caddy/Caddyfile), so even the gateway loses its host port.
+#   2. Redis requires AUTH (`--requirepass`); every consumer's REDIS_URL
+#      carries the password.
+#   3. Kafka becomes a 3-broker KRaft cluster (quorum 1@kafka, 2@kafka-2,
+#      3@kafka-3); kafka-init creates topics with rf=3 / min.insync.replicas=2.
+#   4. One pg_dump backup sidecar per Postgres, daily, 7d/4w/6m retention.
+#   5. Secrets are REQUIRED (`${VAR:?...}`) — compose refuses to start
+#      with an unset/empty secret instead of falling back to a dev default.
+#
+# Anchors cannot cross files, so the resource-budget anchors are redefined
+# here (same shape as the base file) for the services this overlay ADDS.
+
+name: backend
+
+x-prod-platform-defaults: &platform-defaults
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits: { cpus: "1.0", memory: "1G" }
+      reservations: { cpus: "0.1", memory: "128M" }
+
+# Backup sidecars idle 99% of the day; pg_dump bursts are short.
+x-backup-defaults: &backup-defaults
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits: { cpus: "0.25", memory: "256M" }
+      reservations: { cpus: "0.05", memory: "64M" }
+
+# Shared env for the two extra brokers + overrides for broker 1.
+# 3-voter KRaft quorum; offsets/txn-state topics replicated across all
+# three; default.replication.factor / min.insync.replicas set as broker
+# defaults so even an accidentally auto-created topic would be safe.
+# The dev-only EXTERNAL listener (host access on 9094) is dropped —
+# nothing outside the docker network talks to Kafka in prod.
+x-kafka-broker-env: &kafka-broker-env
+  KAFKA_PROCESS_ROLES: "broker,controller"
+  KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093,2@kafka-2:9093,3@kafka-3:9093"
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+  KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+  KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+  KAFKA_DEFAULT_REPLICATION_FACTOR: "3"
+  KAFKA_MIN_INSYNC_REPLICAS: "2"
+  # Must match broker 1's CLUSTER_ID (base file) — one cluster, three nodes.
+  CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+
+x-kafka-healthcheck: &kafka-healthcheck
+  test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+  interval: 15s
+  timeout: 10s
+  retries: 10
+  start_period: 30s
+
+# All three app services point at the full broker list so losing one
+# broker doesn't take down producers/consumers.
+x-kafka-bootstrap: &kafka-bootstrap "kafka:9092,kafka-2:9092,kafka-3:9092"
+
+volumes:
+  kafka_2_data:
+  kafka_3_data:
+  postgres_auth_backups:
+  postgres_agents_backups:
+
+services:
+  # ============================================================
+  # Edge — caddy stays the ONLY service with published ports.
+  # Set CADDY_HTTPS_PORT=443 / CADDY_HTTP_PORT=80 in .env.prod and swap
+  # the Caddyfile hostnames for real DNS names (Let's Encrypt kicks in).
+  # ============================================================
+
+  # Caddy reaches the gateway at gateway:3000 over the docker network,
+  # so the gateway's host port goes away in prod.
+  gateway:
+    ports: !override []
+    environment:
+      NODE_ENV: production
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required in production — generate with `openssl rand -hex 32`}
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}@redis:6379"
+
+  # ============================================================
+  # Platform: messaging + cache
+  # ============================================================
+  kafka:
+    ports: !override []
+    environment:
+      <<: *kafka-broker-env
+      KAFKA_NODE_ID: "1"
+      # Drop the EXTERNAL listener the dev file advertises on localhost.
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+
+  kafka-2:
+    image: apache/kafka:3.7.1
+    container_name: kafka-2
+    networks: [backend_platform]
+    environment:
+      <<: *kafka-broker-env
+      KAFKA_NODE_ID: "2"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-2:9092"
+    volumes:
+      - kafka_2_data:/var/lib/kafka/data
+    healthcheck: *kafka-healthcheck
+    <<: *platform-defaults
+
+  kafka-3:
+    image: apache/kafka:3.7.1
+    container_name: kafka-3
+    networks: [backend_platform]
+    environment:
+      <<: *kafka-broker-env
+      KAFKA_NODE_ID: "3"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-3:9092"
+    volumes:
+      - kafka_3_data:/var/lib/kafka/data
+    healthcheck: *kafka-healthcheck
+    <<: *platform-defaults
+
+  # kafka-ui is an UNAUTHENTICATED admin UI — it must not run unattended
+  # in prod. Parking it behind a profile (instead of deleting the service)
+  # keeps it one flag away for break-glass debugging:
+  #   docker compose ... --profile debug up -d kafka-ui
+  # Even then it gets no host port — reach it over an SSH tunnel into the
+  # docker network, never the public interface.
+  kafka-ui:
+    profiles: ["debug"]
+    ports: !override []
+    environment:
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: *kafka-bootstrap
+
+  # rf=3 / min-ISR=2 needs all three brokers up before topic creation.
+  kafka-init:
+    environment:
+      KAFKA_REPLICATION_FACTOR: "3"
+      KAFKA_MIN_INSYNC_REPLICAS: "2"
+    depends_on:
+      kafka: { condition: service_healthy }
+      kafka-2: { condition: service_healthy }
+      kafka-3: { condition: service_healthy }
+
+  redis:
+    ports: !override []
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}
+    environment:
+      # redis-cli reads REDISCLI_AUTH automatically — keeps the password
+      # out of the healthcheck command line (`-a` would warn + leak to ps).
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}
+    healthcheck:
+      # `redis-cli ping` exits 0 even on a NOAUTH error reply, so assert
+      # the PONG instead of trusting the exit code.
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+
+  # ============================================================
+  # Platform: per-service Postgres + daily backup sidecars
+  # ============================================================
+  postgres-auth:
+    ports: !override []
+    environment:
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:?AUTH_DB_PASSWORD is required in production}
+
+  postgres-agents:
+    ports: !override []
+    environment:
+      POSTGRES_PASSWORD: ${AGENTS_DB_PASSWORD:?AGENTS_DB_PASSWORD is required in production}
+
+  # prodrigestivill/postgres-backup-local — cron-in-container pg_dump with
+  # rotation. Tag pinned to the Postgres major (16) so the client tools
+  # always match the 16-alpine servers. `--format=custom` makes dumps
+  # pg_restore-able (selective/parallel restore); the image still gzips
+  # the stream, hence the restore drill is `gunzip -c ... | pg_restore`
+  # (docs/PRODUCTION.md). The image ships a built-in Docker HEALTHCHECK
+  # against its status endpoint on HEALTHCHECK_PORT.
+  postgres-auth-backup:
+    image: prodrigestivill/postgres-backup-local:16
+    container_name: postgres-auth-backup
+    networks: [backend_platform]
+    depends_on:
+      postgres-auth: { condition: service_healthy }
+    environment:
+      POSTGRES_HOST: postgres-auth
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${AUTH_DB_NAME:-auth}
+      POSTGRES_USER: ${AUTH_DB_USER:-auth}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:?AUTH_DB_PASSWORD is required in production}
+      POSTGRES_EXTRA_OPTS: "--format=custom"
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: "7"
+      BACKUP_KEEP_WEEKS: "4"
+      BACKUP_KEEP_MONTHS: "6"
+      HEALTHCHECK_PORT: "8080"
+    volumes:
+      - postgres_auth_backups:/backups
+    <<: *backup-defaults
+
+  postgres-agents-backup:
+    image: prodrigestivill/postgres-backup-local:16
+    container_name: postgres-agents-backup
+    networks: [backend_platform]
+    depends_on:
+      postgres-agents: { condition: service_healthy }
+    environment:
+      POSTGRES_HOST: postgres-agents
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${AGENTS_DB_NAME:-agents}
+      POSTGRES_USER: ${AGENTS_DB_USER:-agents}
+      POSTGRES_PASSWORD: ${AGENTS_DB_PASSWORD:?AGENTS_DB_PASSWORD is required in production}
+      POSTGRES_EXTRA_OPTS: "--format=custom"
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: "7"
+      BACKUP_KEEP_WEEKS: "4"
+      BACKUP_KEEP_MONTHS: "6"
+      HEALTHCHECK_PORT: "8080"
+    volumes:
+      - postgres_agents_backups:/backups
+    <<: *backup-defaults
+
+  # ============================================================
+  # Platform: vector store
+  # ============================================================
+  qdrant:
+    ports: !override []
+
+  # ============================================================
+  # Platform: observability — internal-only in prod. Dashboards are
+  # reached over an SSH tunnel / VPN into the host, not the internet.
+  # ============================================================
+  jaeger:
+    ports: !override []
+
+  otel-collector:
+    ports: !override []
+
+  prometheus:
+    ports: !override []
+
+  alertmanager:
+    ports: !override []
+
+  loki:
+    ports: !override []
+
+  grafana:
+    ports: !override []
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?GRAFANA_ADMIN_USER is required in production}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required in production}
+
+  # ============================================================
+  # Applications
+  # ============================================================
+  auth-service:
+    environment:
+      NODE_ENV: production
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required in production — generate with `openssl rand -hex 32`}
+      # Credentials live in ONE env var each (the *_DB_PASSWORD that also
+      # feeds the postgres container + backup sidecar) instead of being
+      # duplicated inside a hand-written URL. Passwords must be URL-safe
+      # (no @ : / # ?) or percent-encoded — see infra/.env.prod.example.
+      DATABASE_URL: "postgres://${AUTH_DB_USER:-auth}:${AUTH_DB_PASSWORD:?AUTH_DB_PASSWORD is required in production}@postgres-auth:5432/${AUTH_DB_NAME:-auth}"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}@redis:6379"
+      KAFKA_BROKERS: *kafka-bootstrap
+
+  # No NODE_ENV equivalent: the service's Env (pydantic BaseSettings,
+  # services/ai-agents/app/infrastructure/config/env.py) has no debug/env
+  # flag to flip — prod hardening here is creds + broker list only.
+  ai-agents-service:
+    environment:
+      DATABASE_URL: "postgres://${AGENTS_DB_USER:-agents}:${AGENTS_DB_PASSWORD:?AGENTS_DB_PASSWORD is required in production}@postgres-agents:5432/${AGENTS_DB_NAME:-agents}"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}@redis:6379"
+      KAFKA_BROKERS: *kafka-bootstrap

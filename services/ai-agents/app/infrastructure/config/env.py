@@ -36,6 +36,20 @@ class Env(BaseSettings):
     # How many times the Kafka consumer retries a handler before DLQ.
     kafka_max_handler_attempts: int = 3
 
+    # Per-user abuse caps. Both are enforced with in-process state —
+    # this service runs as a single process, so an in-memory count IS
+    # the global count (move the counters to Redis if it ever scales
+    # horizontally).
+    # Max simultaneously open agent WebSocket connections per user. A
+    # connection over the cap is accepted then closed with WS 1008 so
+    # the browser sees the code + reason instead of an opaque handshake
+    # failure.
+    max_ws_connections_per_user: int = 8
+    # Max active+queued runs a single user may hold across ALL their
+    # threads. Submissions over the cap get an `error` event on the
+    # WebSocket (HTTP 429 on the turns endpoints); the socket stays open.
+    max_concurrent_runs_per_user: int = 4
+
     # File storage backend. `local` (default) writes to `files_local_dir`;
     # `memory` is dict-backed (tests only); `s3` is interface-only today
     # (see `infrastructure/files/file_storage.py` — raises at construction

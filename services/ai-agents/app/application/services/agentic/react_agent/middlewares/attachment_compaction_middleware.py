@@ -376,13 +376,31 @@ def _cutoff_index(messages: list, *, keep: int) -> int:
 
 def _owner_id_from_config() -> str | None:
     """Same accessor pattern as the preload middleware — read the
-    live RunnableConfig from its contextvar."""
+    live RunnableConfig from its contextvar.
+
+    A None result is survivable (eviction falls back to minimal,
+    metadata-less stubs) but it usually means the host forgot to seed
+    `configurable.owner_id` — warn loudly so the degradation is
+    debuggable instead of silent."""
     config = var_child_runnable_config.get()
     if not isinstance(config, dict):
+        _log.warning(
+            "attachment_compaction.owner_id_unresolved "
+            "reason=no_runnable_config — eviction stubs will lack "
+            "captions and file metadata"
+        )
         return None
     configurable = config.get("configurable") or {}
     owner_id = configurable.get("owner_id")
-    return owner_id if isinstance(owner_id, str) else None
+    if not isinstance(owner_id, str):
+        _log.warning(
+            "attachment_compaction.owner_id_unresolved "
+            "reason=missing_in_configurable thread_id=%s — eviction "
+            "stubs will lack captions and file metadata",
+            configurable.get("thread_id"),
+        )
+        return None
+    return owner_id
 
 
 def _tool_call_file_ids(messages: list) -> dict[str, str]:
