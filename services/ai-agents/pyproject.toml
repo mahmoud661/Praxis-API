@@ -2,7 +2,7 @@
 name = "ai-agents-service"
 version = "0.1.0"
 description = "AI agents service: agent definitions, runs, LLM orchestration."
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.13"
 dependencies = [
   "fastapi==0.111.0",
   "uvicorn[standard]==0.29.0",
@@ -40,7 +40,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "pytest==8.2.0",
+  "pytest>=8.4.0",
   "pytest-asyncio==1.4.0",
   "ruff==0.4.4",
   "mypy==2.1.0",

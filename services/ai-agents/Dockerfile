@@ -3,16 +3,17 @@
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_SYSTEM_PYTHON=1
 
 WORKDIR /app
 
 # uv from its official image (multi-arch, single binary).
 COPY --from=ghcr.io/astral-sh/uv:0.7.14 /uv /uvx /usr/local/bin/
 
-# Install everything (incl. pytest) into the system Python.
-COPY requirements.txt ./
-RUN uv pip install --system --no-cache -r requirements.txt
+# Install everything (incl. dev/pytest) locked to uv.lock.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-cache --extra dev
 
 COPY app ./app
 COPY tests ./tests
