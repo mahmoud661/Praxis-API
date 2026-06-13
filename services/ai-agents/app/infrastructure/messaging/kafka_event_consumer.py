@@ -116,7 +116,7 @@ class KafkaEventConsumer(EventConsumer):
             try:
                 await self._task
             except asyncio.CancelledError:
-                pass
+                pass  # expected: we just cancelled this task
         if self._consumer is not None:
             await self._consumer.stop()
         if self._dlq_producer is not None:

@@ -83,8 +83,15 @@ export function buildApp(deps: {
   app.use(express.json({ limit: "100kb" }));
   app.use(cookieParser(config.SESSION_SECRET));
 
+  const probeLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: 120, // allow up to 2 req/s for load-balancer health checks
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
   app.get("/healthz", (_req, res) => res.json({ status: "ok" }));
-  app.get("/readyz", async (_req, res) => {
+  app.get("/readyz", probeLimiter, async (_req, res) => {
     try {
       await redis.ping();
       res.json({ ready: true });

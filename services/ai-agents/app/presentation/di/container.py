@@ -60,27 +60,16 @@ from ..controllers.threads_controller import ThreadsController
 from ..controllers.turns_controller import TurnsController
 from ..http.ws_connection_registry import WsConnectionRegistry
 # Routes are auto-mounted by `mount_routes()` scanning presentation/routes/.
-# Importing each module triggers its `BaseRoute` subclass registration;
-# binding the classes into the `_AUTO_MOUNT_ROUTES` tuple below makes the
-# references semantic (so ruff F401 + CodeQL `py/unused-import` both stay
-# quiet) and keeps a future packaging step from tree-shaking the modules.
-from ..routes.agents_runs_route import AgentsRunsRoute
-from ..routes.agents_ws_route import AgentsWsRoute
-from ..routes.capabilities_route import CapabilitiesRoute
-from ..routes.files_route import FilesRoute
-from ..routes.notifications_ws_route import NotificationsWsRoute
-from ..routes.threads_route import ThreadsRoute
-from ..routes.turns_route import TurnsRoute
-
-_AUTO_MOUNT_ROUTES: tuple[type, ...] = (
-    AgentsRunsRoute,
-    AgentsWsRoute,
-    CapabilitiesRoute,
-    FilesRoute,
-    NotificationsWsRoute,
-    ThreadsRoute,
-    TurnsRoute,
-)
+# Importing each module triggers its `BaseRoute` subclass registration.
+# The `as X` re-export form signals to linters and static analysers that
+# these imports are intentional, preventing false unused-import alerts.
+from ..routes.agents_runs_route import AgentsRunsRoute as AgentsRunsRoute
+from ..routes.agents_ws_route import AgentsWsRoute as AgentsWsRoute
+from ..routes.capabilities_route import CapabilitiesRoute as CapabilitiesRoute
+from ..routes.files_route import FilesRoute as FilesRoute
+from ..routes.notifications_ws_route import NotificationsWsRoute as NotificationsWsRoute
+from ..routes.threads_route import ThreadsRoute as ThreadsRoute
+from ..routes.turns_route import TurnsRoute as TurnsRoute
 
 _APP_ROOT = Path(__file__).resolve().parents[2]  # .../app/
 
