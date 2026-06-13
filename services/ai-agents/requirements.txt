@@ -15,7 +15,7 @@ langgraph>=1.0.5
 # version we're on. The runtime serves via uvicorn directly, so we don't
 # need the CLI in the image.
 langgraph-checkpoint-postgres
-psycopg[binary,pool]==3.2.3
+psycopg[binary,pool]==3.3.4
 asyncpg>=0.31.0
 # LangChain — the agentic runtime uses these for `init_chat_model`,
 # middleware types, tool nodes. langchain-core resolves with langchain.
