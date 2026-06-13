@@ -43,7 +43,6 @@ prose than to fail a model turn over missing config.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
@@ -60,9 +59,6 @@ from ..references import resolve as resolve_references
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-
-
-_log = logging.getLogger(__name__)
 
 
 class ContentReferenceMiddleware(AgentMiddleware):

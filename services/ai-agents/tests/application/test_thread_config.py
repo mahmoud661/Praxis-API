@@ -26,10 +26,10 @@ class _Stub:
 
         return _async
 
-    def info(self, *a: object, **kw: object) -> None: ...
-    def warning(self, *a: object, **kw: object) -> None: ...
-    def error(self, *a: object, **kw: object) -> None: ...
-    def debug(self, *a: object, **kw: object) -> None: ...
+    def info(self, *a: object, **kw: object) -> None: pass
+    def warning(self, *a: object, **kw: object) -> None: pass
+    def error(self, *a: object, **kw: object) -> None: pass
+    def debug(self, *a: object, **kw: object) -> None: pass
 
 
 _FIXTURE_FOLDER = Path(__file__).parent / "fixture_agents"

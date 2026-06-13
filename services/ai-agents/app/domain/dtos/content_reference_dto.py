@@ -16,17 +16,17 @@ its own package, only the import path on the right changes.
 from __future__ import annotations
 
 from ...application.services.agentic.react_agent.references import (
-    ALL_CATEGORIES,
-    ATTACHMENT_CATEGORIES,
-    CITATION_CATEGORIES,
-    AttachmentRef,
-    AttachmentReference,
-    CitationReference,
-    ContentReference,
-    ParsedAlias,
-    ParsedCitation,
-    WebpageRef,
-    category_for_mime,
+    ALL_CATEGORIES as ALL_CATEGORIES,
+    ATTACHMENT_CATEGORIES as ATTACHMENT_CATEGORIES,
+    CITATION_CATEGORIES as CITATION_CATEGORIES,
+    AttachmentRef as AttachmentRef,
+    AttachmentReference as AttachmentReference,
+    CitationReference as CitationReference,
+    ContentReference as ContentReference,
+    ParsedAlias as ParsedAlias,
+    ParsedCitation as ParsedCitation,
+    WebpageRef as WebpageRef,
+    category_for_mime as category_for_mime,
 )
 
 __all__ = [

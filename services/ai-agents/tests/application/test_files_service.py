@@ -20,10 +20,10 @@ from app.infrastructure.files.file_storage import InMemoryFileStorage
 
 
 class _FakeLogger:
-    def info(self, *a: object, **kw: object) -> None: ...
-    def warning(self, *a: object, **kw: object) -> None: ...
-    def error(self, *a: object, **kw: object) -> None: ...
-    def debug(self, *a: object, **kw: object) -> None: ...
+    def info(self, *a: object, **kw: object) -> None: pass
+    def warning(self, *a: object, **kw: object) -> None: pass
+    def error(self, *a: object, **kw: object) -> None: pass
+    def debug(self, *a: object, **kw: object) -> None: pass
 
 
 @dataclass

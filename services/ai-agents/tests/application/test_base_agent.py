@@ -8,7 +8,7 @@ from app.application.services.agentic.base_agent import BaseAgent
 
 def test_subclass_without_spec_rejected_at_class_definition():
     with pytest.raises(TypeError) as exc:
-        class NoSpec(BaseAgent):  # type: ignore[misc]
+        class _NoSpec(BaseAgent):  # type: ignore[misc]
             def _build(self) -> object:
                 return None
 
@@ -17,7 +17,7 @@ def test_subclass_without_spec_rejected_at_class_definition():
 
 def test_subclass_with_non_spec_value_rejected():
     with pytest.raises(TypeError) as exc:
-        class WrongType(BaseAgent):
+        class _WrongType(BaseAgent):
             spec = "not an AgentSpec"  # type: ignore[assignment]
 
             def _build(self) -> object:

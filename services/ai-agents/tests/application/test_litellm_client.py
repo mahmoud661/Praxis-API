@@ -25,10 +25,10 @@ class _FakeLogger:
     output, but every log path needs SOMETHING that responds to the
     expected methods so the client doesn't crash."""
 
-    def info(self, *a: object, **kw: object) -> None: ...
-    def warning(self, *a: object, **kw: object) -> None: ...
-    def error(self, *a: object, **kw: object) -> None: ...
-    def debug(self, *a: object, **kw: object) -> None: ...
+    def info(self, *a: object, **kw: object) -> None: pass
+    def warning(self, *a: object, **kw: object) -> None: pass
+    def error(self, *a: object, **kw: object) -> None: pass
+    def debug(self, *a: object, **kw: object) -> None: pass
 
 
 def test_parse_row_minimal():

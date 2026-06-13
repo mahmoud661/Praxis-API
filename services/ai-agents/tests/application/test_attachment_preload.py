@@ -65,7 +65,7 @@ class _FakeFilesService:
     async def set_caption(
         self, *, file_id: str, owner_id: str, caption: str
     ) -> None:  # pragma: no cover
-        del file_id, owner_id, caption
+        pass
 
     def seed(
         self, *, owner_id: str, file_id: str, filename: str, mime: str, data: bytes
