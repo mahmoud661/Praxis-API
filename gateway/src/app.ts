@@ -57,6 +57,11 @@ export function buildApp(deps: {
 }): GatewayHandles {
   const { config, resolver, redis, logger } = deps;
   const app = express();
+  const memoryBreaker = new CircuitBreaker(
+    "memory-service",
+    config.PROXY_CB_THRESHOLD,
+    config.PROXY_CB_RESET_MS,
+  );
 
   app.disable("x-powered-by");
   // Trust one hop (the LB or Caddy in front). `true` is too permissive and
@@ -219,6 +224,22 @@ export function buildApp(deps: {
     }),
   );
 
+  // /v1/knowledge/* — memory-service REST surface for the knowledge page.
+  // Read-heavy (search, list) so no idempotency layer; rate-limited per identity.
+  app.use(
+    "/v1/knowledge",
+    attachSession,
+    requireSession,
+    perIdentityLimit,
+    makeCircuitBreakerMiddleware(memoryBreaker),
+    makeServiceProxy({
+      target: config.MEMORY_SERVICE_URL,
+      requireAuth: true,
+      pathRewrite: reprefix("/knowledge"),
+      logger,
+    }),
+  );
+
   // -----------------------------------------------------------------
   // Legacy paths (no version prefix) — kept as alias for backward compat,
   // marked Deprecated. Remove once all clients move to /v1.
@@ -284,7 +305,7 @@ export function buildApp(deps: {
 
   logger.info("gateway routes wired", {
     versions: ["v1"],
-    breakers: [authBreaker.name, agentsBreaker.name],
+    breakers: [authBreaker.name, agentsBreaker.name, memoryBreaker.name],
     ws: ["/v1/ws/*"],
   });
   return { app, wsProxy };

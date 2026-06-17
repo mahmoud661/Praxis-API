@@ -15,10 +15,9 @@ export class RedisSessionResolver implements SessionResolver {
 
   async resolve(sessionId: string): Promise<ResolvedUser | null> {
     if (!sessionId) return null;
-    const raw = await this.redis.get(`sess:${sessionId}`);
+    // GETEX: atomic get + sliding TTL renewal in one round-trip (was two).
+    const raw = await this.redis.getex(`sess:${sessionId}`, "EX", this.ttlSeconds);
     if (!raw) return null;
-    // Sliding session: every successful resolution extends the TTL.
-    await this.redis.expire(`sess:${sessionId}`, this.ttlSeconds);
     const data = JSON.parse(raw) as {
       userId: string;
       email: string;

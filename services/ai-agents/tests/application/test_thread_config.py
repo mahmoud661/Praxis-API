@@ -55,6 +55,7 @@ def _service(registry: AgentRegistry) -> ThreadsService:
         redis=stub,  # type: ignore[arg-type]
         logger=stub,  # type: ignore[arg-type]
         agent_registry=registry,
+        event_publisher=stub,  # type: ignore[arg-type]
     )
 
 

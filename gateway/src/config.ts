@@ -35,6 +35,7 @@ const schema = z.object({
   SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(86400),
   AUTH_SERVICE_URL: z.string().url(),
   AI_AGENTS_SERVICE_URL: z.string().url(),
+  MEMORY_SERVICE_URL: z.string().url().default("http://memory-service:8001"),
   // Resilience knobs
   PROXY_CB_THRESHOLD: z.coerce.number().int().positive().default(5),
   PROXY_CB_RESET_MS: z.coerce.number().int().positive().default(15000),

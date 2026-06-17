@@ -198,7 +198,7 @@ def register_dependencies() -> Container:
         "LiteLLMClient",
         LiteLLMClient(
             base_url=env.litellm_proxy_api_base,
-            master_key=env.litellm_master_key,
+            master_key=env.litellm_master_key or env.litellm_proxy_api_key,
             logger=logger,
         ),
     )

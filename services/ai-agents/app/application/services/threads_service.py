@@ -31,11 +31,15 @@ from ...domain.dtos.thread_dto import (
     ThreadView,
 )
 from ...domain.IRepos.i_thread_repo import IThreadRepo
+from ...domain.events.conversation_events import make_conversation_created, make_conversation_renamed
+from ...domain.ports.event_publisher import EventPublisher
 from ...domain.ports.logger import Logger
 from ...infrastructure.agentic.agentic_store import AgenticStore
 from ...infrastructure.ai.title_generator import TitleGenerator
 from .agentic.agent_registry import AgentRegistry
 from ._errors import InvalidThreadConfigError, ThreadNotFoundError  # noqa: F401  (re-exports)
+
+_AGENTS_TOPIC = "agents.events.v1"
 
 
 # Default title used for freshly-created threads — matches ThreadsService.create
@@ -55,6 +59,7 @@ class ThreadsService:
         redis: Redis,
         logger: Logger,
         agent_registry: AgentRegistry,
+        event_publisher: EventPublisher,
     ) -> None:
         # Resolved by the container by annotation class name.
         self._repo = thread_repo
@@ -63,6 +68,7 @@ class ThreadsService:
         self._redis = redis
         self._logger = logger
         self._registry = agent_registry
+        self._publisher = event_publisher
 
     async def create(
         self, *, owner_id: str, title: str | None = None
@@ -76,6 +82,13 @@ class ThreadsService:
             updated_at=now,
         )
         await self._repo.upsert(thread)
+        event = make_conversation_created(
+            thread_id=thread.id,
+            owner_id=owner_id,
+            title=thread.title,
+            created_at=thread.created_at,
+        )
+        await self._publisher.publish(_AGENTS_TOPIC, [event])
         self._logger.info(
             "thread.created", thread_id=thread.id, owner_id=owner_id
         )
@@ -269,6 +282,24 @@ class ThreadsService:
                 error=str(err),
             )
             return None
+
+        # Keep the knowledge graph node name in sync with the new title.
+        # Best-effort — a Kafka blip must not fail title generation.
+        try:
+            await self._publisher.publish(
+                _AGENTS_TOPIC,
+                [make_conversation_renamed(
+                    thread_id=thread_id,
+                    owner_id=owner_id,
+                    title=final_title,
+                )],
+            )
+        except Exception as err:  # noqa: BLE001
+            self._logger.warning(
+                "thread.title.kafka_publish_failed",
+                thread_id=thread_id,
+                error=str(err),
+            )
 
         # Terminal "this is the final title" — lets the frontend mark
         # the streaming animation as done and stop accepting future

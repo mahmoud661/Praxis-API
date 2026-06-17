@@ -1,0 +1,40 @@
+[project]
+name = "memory-service"
+version = "0.1.0"
+description = "Long-term memory service: Graphiti + Neo4j + Qdrant hybrid store, MCP + REST."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "fastapi==0.111.0",
+  "uvicorn[standard]==0.29.0",
+  "pydantic==2.10.5",
+  "pydantic-settings==2.7.1",
+  "python-dotenv==1.0.1",
+  "structlog==25.5.0",
+  "httpx==0.27.0",
+  "mcp[cli]>=1.0.0",
+  "aiokafka==0.10.0",
+  "graphiti-core>=0.3.0",
+  "neo4j>=5.20.0",
+  "qdrant-client>=1.10.0",
+  "opentelemetry-distro>=0.46b0",
+  "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+  "opentelemetry-instrumentation-fastapi==0.63b1",
+  "opentelemetry-instrumentation-logging>=0.46b0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4.0",
+  "pytest-asyncio==1.4.0",
+  "ruff==0.4.4",
+  "mypy==2.1.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q --tb=short"
