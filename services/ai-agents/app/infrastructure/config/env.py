@@ -119,6 +119,10 @@ class Env(BaseSettings):
     compaction_trigger_fraction: float = 0.85
     compaction_keep_messages: int = 10
 
+    # Memory service base URL. The agent's HttpMemoryClient calls this for
+    # memory_search / memory_store tool calls.
+    memory_service_url: str = "http://memory-service:8001"
+
     @property
     def kafka_broker_list(self) -> list[str]:
         return [b.strip() for b in self.kafka_brokers.split(",") if b.strip()]

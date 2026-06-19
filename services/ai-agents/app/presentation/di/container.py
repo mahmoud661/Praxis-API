@@ -39,6 +39,7 @@ from ...infrastructure.ai.title_generator import TitleGenerator
 from ...infrastructure.cache.event_stream import EventStream
 from ...infrastructure.config.env import load_env
 from ...infrastructure.documents.document_extractor import DocumentExtractor
+from ...infrastructure.memory.http_memory_client import HttpMemoryClient
 from ...infrastructure.files.file_storage import (
     IFileStorage,
     InMemoryFileStorage,
@@ -257,6 +258,11 @@ def register_dependencies() -> Container:
         container.register("IVectorStore", InMemoryVectorStore())
     else:
         container.register("IVectorStore", QdrantVectorStore(env, logger))
+
+    # Memory client — HTTP adapter calling the memory service REST API.
+    # Registered before AgentRegistry.discover() so GeneralAgent can
+    # resolve `IMemoryClient` from its constructor annotation.
+    container.register("IMemoryClient", HttpMemoryClient(env))
 
     # Pre-register KnowledgeService + FilesService manually so the
     # AgentRunner construction below can resolve IFilesService. The

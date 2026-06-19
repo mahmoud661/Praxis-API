@@ -61,12 +61,24 @@ class ThreadRepo:
             limit=1000,
         )
         out = [_to_view(it.key, it.value) for it in items]
+        # Exclude soft-deleted threads from normal listings.
+        out = [t for t in out if t.deleted_at is None]
         # Newest activity first — the sidebar wants `ORDER BY updated_at DESC`.
         out.sort(key=lambda t: t.updated_at, reverse=True)
         return out
 
     async def delete(self, thread_id: str) -> None:
         await self._agentic.store.adelete(_NAMESPACE, thread_id)
+
+    async def soft_delete(self, thread_id: str) -> None:
+        item = await self._agentic.store.aget(_NAMESPACE, thread_id)
+        if item is None:
+            return
+        await self._agentic.store.aput(
+            _NAMESPACE,
+            thread_id,
+            {**item.value, "deleted_at": _now_iso()},
+        )
 
     async def touch(self, thread_id: str) -> None:
         item = await self._agentic.store.aget(_NAMESPACE, thread_id)
@@ -100,13 +112,16 @@ class ThreadRepo:
 
 
 def _value_from_view(thread: ThreadView) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "owner_id": thread.owner_id,
         "title": thread.title,
         "created_at": thread.created_at,
         "updated_at": thread.updated_at,
         "config": _config_to_dict(thread.config),
     }
+    if thread.deleted_at is not None:
+        out["deleted_at"] = thread.deleted_at
+    return out
 
 
 def _config_to_dict(config: ThreadConfigView) -> dict[str, Any]:
@@ -140,6 +155,7 @@ def _config_from_dict(raw: object) -> ThreadConfigView:
 
 
 def _to_view(key: str, value: dict[str, object]) -> ThreadView:
+    raw_deleted = value.get("deleted_at")
     return ThreadView(
         id=key,
         owner_id=str(value.get("owner_id", "")),
@@ -147,4 +163,5 @@ def _to_view(key: str, value: dict[str, object]) -> ThreadView:
         created_at=str(value.get("created_at", _now_iso())),
         updated_at=str(value.get("updated_at", _now_iso())),
         config=_config_from_dict(value.get("config")),
+        deleted_at=str(raw_deleted) if raw_deleted is not None else None,
     )

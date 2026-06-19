@@ -31,7 +31,19 @@ EXECUTE_PROMPT = (
     "When the user attaches a file, call `read_attachment` "
     "with its id before answering. When the user asks about "
     "topics likely covered by their uploaded documents, call "
-    "`kb_search` first."
+    "`kb_search` first. "
+    "Call `memory_search` when the user references a past conversation, "
+    "asks 'do you remember…', or when background context from previous "
+    "sessions would meaningfully improve your answer. "
+    "Call `memory_store` proactively after any turn where the user "
+    "shares something worth remembering across sessions — a preference, "
+    "a key fact about themselves, a decision, or a recurring topic. "
+    "Use memory_type='semantic' for durable facts/preferences and "
+    "'episodic' for events or interactions that happened. "
+    "Call `memory_forget` when the user says 'forget that X', 'that's wrong "
+    "remove it', or 'delete the memory about Y' — it deletes matching episodes. "
+    "Call `memory_clear` ONLY when the user explicitly asks to clear, "
+    "reset, or forget ALL their memories — this is irreversible."
 )
 
 __all__ = ["SYSTEM_PROMPT", "QUALIFY_PROMPT", "EXECUTE_PROMPT"]

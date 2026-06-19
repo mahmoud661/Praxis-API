@@ -75,6 +75,7 @@ def create_app() -> FastAPI:
             # Close the embedding client's httpx pool. Same no-op-if-
             # unused semantics as the LiteLLM admin client above.
             await container.resolve("IEmbeddingClient").aclose()
+            await container.resolve("IMemoryClient").aclose()
             await agentic_store.dispose()
 
     app = FastAPI(title="ai-agents-service", lifespan=lifespan)

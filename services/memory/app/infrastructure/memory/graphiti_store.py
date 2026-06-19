@@ -12,6 +12,33 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+from pydantic import BaseModel
+
+
+class Preference(BaseModel):
+    """A preference, taste, like, dislike, or habitual behavior of the user."""
+
+
+class Fact(BaseModel):
+    """A factual statement, belief, or piece of information about the user or their world."""
+
+
+_ENTITY_TYPES: dict[str, type[BaseModel]] = {
+    "Preference": Preference,
+    "Fact": Fact,
+}
+
+
+def _parse_dt(value: str) -> datetime:
+    """Parse ISO-8601 string to timezone-aware datetime, defaulting to now."""
+    if not value:
+        return datetime.now(tz=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(value)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return datetime.now(tz=timezone.utc)
+
 from graphiti_core import Graphiti
 from graphiti_core.llm_client.openai_client import LLMConfig, OpenAIClient
 from graphiti_core.embedder import OpenAIEmbedder, OpenAIEmbedderConfig
@@ -40,17 +67,20 @@ class GraphitiMemoryStore:
         llm_api_key: str,
         llm_model: str,
         llm_base_url: str | None = None,
+        llm_temperature: float = 0.0,
+        llm_small_model: str | None = None,
         embedding_model: str = "text-embedding-3-small",
         embedding_api_key: str | None = None,
         embedding_base_url: str | None = None,
     ) -> None:
-        llm_client = OpenAIClient(
-            config=LLMConfig(
-                api_key=llm_api_key,
-                model=llm_model,
-                base_url=llm_base_url,
-            )
+        llm_cfg = LLMConfig(
+            api_key=llm_api_key,
+            model=llm_model,
+            base_url=llm_base_url,
+            temperature=llm_temperature,
+            small_model=llm_small_model,
         )
+        llm_client = OpenAIClient(config=llm_cfg)
         embedder = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
                 api_key=embedding_api_key or llm_api_key,
@@ -58,13 +88,7 @@ class GraphitiMemoryStore:
                 base_url=embedding_base_url or llm_base_url,
             )
         )
-        cross_encoder = OpenAIRerankerClient(
-            config=LLMConfig(
-                api_key=llm_api_key,
-                model=llm_model,
-                base_url=llm_base_url,
-            )
-        )
+        cross_encoder = OpenAIRerankerClient(config=llm_cfg)
         self._graphiti = Graphiti(
             uri=neo4j_uri,
             user=neo4j_user,
@@ -79,15 +103,164 @@ class GraphitiMemoryStore:
 
     async def add_episode(self, episode: Episode) -> str:
         episode_id = episode.id or str(uuid.uuid4())
+        user_name = await self._get_entity_name(episode.owner_id)
+        # Prefix with the user's known entity name so Graphiti's extract_message
+        # prompt extracts them as the speaker and deduplicates against the
+        # existing provisioned user node, linking all entities back to it.
+        formatted_body = f"{user_name}: {episode.content}" if user_name else episode.content
         await self._graphiti.add_episode(
             name=episode_id,
-            episode_body=episode.content,
-            source=EpisodeType.text,
+            episode_body=formatted_body,
+            source=EpisodeType.message,
             source_description=episode.source,
             reference_time=episode.created_at or datetime.now(tz=timezone.utc),
             group_id=episode.owner_id,
+            entity_types=_ENTITY_TYPES,
         )
+        # After extraction, promote any Person entity that was co-mentioned
+        # with the user in this episode as a potential name claim. If the user
+        # entity is still named by email (contains @) and the episode contains
+        # a name-claim phrase, rename the user node so all future episodes use
+        # the real name as the speaker prefix and dedup correctly.
+        if user_name and "@" in user_name:
+            await self._maybe_promote_user_name(
+                owner_id=episode.owner_id,
+                episode_id=episode_id,
+                current_name=user_name,
+                content=episode.content,
+            )
+        # Merge duplicate user-name nodes so the graph stays clean.
+        await self._merge_duplicate_user_nodes(owner_id=episode.owner_id)
+        # Link all entities extracted from this episode to the originating
+        # conversation thread node via a DISCUSSED_IN edge.
+        if episode.thread_id:
+            await self._link_episode_to_thread(
+                owner_id=episode.owner_id,
+                episode_id=episode_id,
+                thread_id=episode.thread_id,
+            )
         return episode_id
+
+    async def _maybe_promote_user_name(
+        self,
+        *,
+        owner_id: str,
+        episode_id: str,
+        current_name: str,
+        content: str,
+    ) -> None:
+        """If a name-claim is detected in the content, update the user's entity
+        node name to the stated name so future episodes link correctly."""
+        import re
+        # Match "my name is X" or "call me X" only — not "I am a developer" etc.
+        # Name must be 1–3 proper-cased words, no articles/prepositions.
+        _STOP = {"a", "an", "the", "not", "also", "just", "very", "quite"}
+        pattern = re.compile(
+            r"(?:my name is|call me)\s+([A-Z][A-Za-z'-](?:[A-Za-z'-]+)?"
+            r"(?:\s+[A-Z][A-Za-z'-]+){0,2})",
+        )
+        match = pattern.search(content)
+        if not match:
+            return
+        claimed_name = match.group(1).strip().rstrip(".,!?")
+        if (not claimed_name or len(claimed_name) < 2
+                or claimed_name.lower() in _STOP
+                or claimed_name.lower() == current_name.lower()):
+            return
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            await session.run(
+                "MATCH (n:Entity {uuid: $uuid}) SET n.name = $name",
+                uuid=owner_id,
+                name=claimed_name,
+            )
+
+    async def _merge_duplicate_user_nodes(self, *, owner_id: str) -> None:
+        """Collapse all entity nodes that share the user's current display name
+        into the canonical user node (uuid == owner_id), transferring edges."""
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            # Transfer MENTIONS edges from duplicates to the canonical node
+            await session.run(
+                """
+                MATCH (root:Entity {uuid: $owner_id, group_id: $owner_id})
+                MATCH (dup:Entity {name: root.name, group_id: $owner_id})
+                WHERE dup.uuid <> root.uuid
+                WITH root, dup
+                MATCH (ep)-[r:MENTIONS]->(dup)
+                MERGE (ep)-[:MENTIONS]->(root)
+                DELETE r
+                """,
+                owner_id=owner_id,
+            )
+            # Transfer RELATES_TO edges from duplicates to the canonical node
+            await session.run(
+                """
+                MATCH (root:Entity {uuid: $owner_id, group_id: $owner_id})
+                MATCH (dup:Entity {name: root.name, group_id: $owner_id})
+                WHERE dup.uuid <> root.uuid
+                WITH root, dup
+                MATCH (dup)-[r:RELATES_TO]->(other:Entity)
+                WHERE other <> root
+                MERGE (root)-[:RELATES_TO {name: r.name, fact: r.fact, uuid: r.uuid, group_id: r.group_id, created_at: r.created_at}]->(other)
+                DELETE r
+                """,
+                owner_id=owner_id,
+            )
+            # Transfer incoming RELATES_TO edges
+            await session.run(
+                """
+                MATCH (root:Entity {uuid: $owner_id, group_id: $owner_id})
+                MATCH (dup:Entity {name: root.name, group_id: $owner_id})
+                WHERE dup.uuid <> root.uuid
+                WITH root, dup
+                MATCH (other:Entity)-[r:RELATES_TO]->(dup)
+                WHERE other <> root
+                MERGE (other)-[:RELATES_TO {name: r.name, fact: r.fact, uuid: r.uuid, group_id: r.group_id, created_at: r.created_at}]->(root)
+                DELETE r
+                """,
+                owner_id=owner_id,
+            )
+            # Delete the now-orphaned duplicate nodes
+            await session.run(
+                """
+                MATCH (root:Entity {uuid: $owner_id, group_id: $owner_id})
+                MATCH (dup:Entity {name: root.name, group_id: $owner_id})
+                WHERE dup.uuid <> root.uuid
+                DETACH DELETE dup
+                """,
+                owner_id=owner_id,
+            )
+
+    async def _link_episode_to_thread(
+        self, *, owner_id: str, episode_id: str, thread_id: str
+    ) -> None:
+        """Create DISCUSSED_IN edges from every entity mentioned in this episode
+        to the Conversation node that represents the originating thread."""
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            await session.run(
+                """
+                MATCH (ep:Episodic {name: $episode_id})
+                MATCH (ep)-[:MENTIONS]->(entity:Entity {group_id: $owner_id})
+                MATCH (conv:Entity {uuid: $thread_id, group_id: $owner_id})
+                MERGE (entity)-[:DISCUSSED_IN]->(conv)
+                """,
+                episode_id=episode_id,
+                owner_id=owner_id,
+                thread_id=thread_id,
+            )
+
+    async def _get_entity_name(self, owner_id: str) -> str | None:
+        """Return the current display name of the user's entity node, or None."""
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            result = await session.run(
+                "MATCH (n:Entity {uuid: $uuid}) RETURN n.name AS name LIMIT 1",
+                uuid=owner_id,
+            )
+            record = await result.single()
+            return record["name"] if record else None
 
     async def search(
         self, *, owner_id: str, query: str, k: int = 10
@@ -103,21 +276,58 @@ class GraphitiMemoryStore:
             num_results=k,
         )
         hits: list[MemorySearchHit] = []
+        episode_ids = []
         for r in results:
             entities = [
                 getattr(n, "name", str(n))
                 for n in getattr(r, "relevant_schema", {}).get("nodes", [])
             ]
+            episode_id = getattr(r, "uuid", "") or getattr(r, "name", "")
+            episode_ids.append(episode_id)
             hits.append(
                 MemorySearchHit(
-                    episode_id=getattr(r, "uuid", ""),
+                    episode_id=episode_id,
                     excerpt=getattr(r, "fact", getattr(r, "episode_body", "")),
                     score=float(getattr(r, "score", 0.0)),
                     source=getattr(r, "source_description", ""),
                     entities=entities,
                 )
             )
+        # Enrich with thread names via DISCUSSED_IN
+        if hits:
+            thread_names = await self._fetch_thread_names(
+                owner_id=owner_id, episode_ids=episode_ids
+            )
+            for hit in hits:
+                hit.thread_name = thread_names.get(hit.episode_id, "")
         return hits
+
+    async def _fetch_thread_names(
+        self, *, owner_id: str, episode_ids: list[str]
+    ) -> dict[str, str]:
+        """Return {episode_id: conversation_name} for each episode."""
+        if not episode_ids:
+            return {}
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                UNWIND $ids AS eid
+                MATCH (ep:Episodic {name: eid, group_id: $owner_id})
+                OPTIONAL MATCH (entity:Entity {group_id: $owner_id})
+                  -[:DISCUSSED_IN]->(conv:Entity)
+                  WHERE (ep)-[:MENTIONS]->(entity)
+                RETURN eid AS episode_id,
+                       collect(DISTINCT conv.name)[0] AS thread_name
+                """,
+                ids=episode_ids,
+                owner_id=owner_id,
+            )
+            records = await result.data()
+        return {
+            rec["episode_id"]: rec.get("thread_name") or ""
+            for rec in records
+        }
 
     async def _list_recent_episodes(
         self, *, owner_id: str, k: int
@@ -127,11 +337,14 @@ class GraphitiMemoryStore:
         async with driver.session() as session:
             result = await session.run(
                 """
-                MATCH (e:EpisodicNode)
-                WHERE e.group_id = $group_id
-                RETURN e.uuid AS episode_id,
+                MATCH (e:Episodic {group_id: $group_id})
+                OPTIONAL MATCH (e)-[:MENTIONS]->(entity:Entity {group_id: $group_id})
+                  -[:DISCUSSED_IN]->(conv:Entity)
+                WITH e, collect(DISTINCT conv.name)[0] AS thread_name
+                RETURN e.name AS episode_id,
                        e.content AS content,
-                       e.source_description AS source
+                       e.source_description AS source,
+                       thread_name
                 ORDER BY e.created_at DESC
                 LIMIT $k
                 """,
@@ -145,6 +358,7 @@ class GraphitiMemoryStore:
                 excerpt=(rec.get("content") or "")[:400],
                 score=1.0,
                 source=rec.get("source") or "",
+                thread_name=rec.get("thread_name") or "",
             )
             for rec in records
         ]
@@ -191,7 +405,8 @@ class GraphitiMemoryStore:
                 RETURN toString(id(n)) AS id,
                        n.name AS name,
                        labels(n) AS labels,
-                       n.summary AS summary
+                       n.summary AS summary,
+                       n.deleted_at AS deleted_at
                 LIMIT $limit
                 """,
                 group_id=owner_id,
@@ -205,7 +420,7 @@ class GraphitiMemoryStore:
                 MATCH (a:Entity {group_id: $group_id})-[r]->(b:Entity {group_id: $group_id})
                 RETURN toString(id(a)) AS src_id,
                        toString(id(b)) AS tgt_id,
-                       type(r) AS rel_type
+                       coalesce(r.name, type(r)) AS rel_type
                 LIMIT $limit
                 """,
                 group_id=owner_id,
@@ -216,12 +431,14 @@ class GraphitiMemoryStore:
         nodes: list[GraphNode] = []
         for rec in node_records:
             type_labels = [l for l in (rec.get("labels") or []) if l != "Entity"]
+            raw_deleted = rec.get("deleted_at")
             nodes.append(
                 GraphNode(
                     id=rec.get("id", ""),
                     name=rec.get("name", ""),
                     type=type_labels[0] if type_labels else "Entity",
                     summary=rec.get("summary", ""),
+                    deleted_at=str(raw_deleted) if raw_deleted is not None else None,
                 )
             )
 
@@ -263,7 +480,7 @@ class GraphitiMemoryStore:
                 name=email,
                 group_id=owner_id,
                 summary="Praxis user",
-                created_at=registered_at,
+                created_at=_parse_dt(registered_at),
             )
 
     async def provision_entity(
@@ -299,7 +516,7 @@ class GraphitiMemoryStore:
                 name=name,
                 group_id=owner_id,
                 summary=summary,
-                created_at=created_at,
+                created_at=_parse_dt(created_at),
             )
 
     async def update_entity_name(
@@ -319,6 +536,27 @@ class GraphitiMemoryStore:
                 uuid=entity_id,
                 group_id=owner_id,
                 name=name,
+            )
+
+    async def soft_delete_entity(
+        self,
+        *,
+        owner_id: str,
+        entity_id: str,
+        deleted_at: str,
+    ) -> None:
+        """Stamp deleted_at on the entity node — keeps it in the graph but
+        marks it as disabled so the frontend can render it differently."""
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            await session.run(
+                """
+                MATCH (e:Entity {uuid: $uuid, group_id: $group_id})
+                SET e.deleted_at = $deleted_at
+                """,
+                uuid=entity_id,
+                group_id=owner_id,
+                deleted_at=deleted_at,
             )
 
     async def link_entities(
@@ -347,6 +585,23 @@ class GraphitiMemoryStore:
                 to_id=to_entity_id,
                 group_id=owner_id,
             )
+
+    async def delete_episodes(self, *, owner_id: str, episode_ids: list[str]) -> int:
+        """Delete specific Episodic nodes and their orphaned entity nodes."""
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                UNWIND $ids AS eid
+                MATCH (ep:Episodic {name: eid, group_id: $owner_id})
+                DETACH DELETE ep
+                RETURN count(ep) AS deleted
+                """,
+                ids=episode_ids,
+                owner_id=owner_id,
+            )
+            record = await result.single()
+            return record["deleted"] if record else 0
 
     async def delete_by_owner(self, *, owner_id: str) -> None:
         driver = self._graphiti.driver

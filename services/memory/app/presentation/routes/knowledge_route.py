@@ -4,6 +4,8 @@ REST routes for the knowledge page frontend.
 All routes read X-User-Id forwarded by the gateway after session auth —
 the memory service never issues or validates sessions itself.
 """
+from typing import Literal
+
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 
@@ -46,6 +48,7 @@ class MemoryEpisodeOut(BaseModel):
     score: float
     source: str
     entities: list[str]
+    thread_name: str = ""
 
 
 class EntityOut(BaseModel):
@@ -54,11 +57,28 @@ class EntityOut(BaseModel):
     summary: str
 
 
+_SOURCE_BY_TYPE: dict[str, str] = {
+    "episodic": "conversation",
+    "semantic": "fact",
+}
+
+
+class EpisodeIn(BaseModel):
+    content: str
+    memory_type: Literal["episodic", "semantic"] = "episodic"
+    thread_id: str | None = None
+
+
+class EpisodeOut(BaseModel):
+    episode_id: str
+
+
 class GraphNodeOut(BaseModel):
     id: str
     name: str
     type: str
     summary: str
+    deleted_at: str | None = None
 
 
 class GraphEdgeOut(BaseModel):
@@ -94,6 +114,7 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
                 score=h.score,
                 source=h.source,
                 entities=h.entities,
+                thread_name=h.thread_name,
             )
             for h in hits
         ]
@@ -145,7 +166,7 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
         graph = await service.get_graph(owner_id=owner_id, limit=limit)
         return KnowledgeGraphOut(
             nodes=[
-                GraphNodeOut(id=n.id, name=n.name, type=n.type, summary=n.summary)
+                GraphNodeOut(id=n.id, name=n.name, type=n.type, summary=n.summary, deleted_at=n.deleted_at)
                 for n in graph.nodes
             ],
             edges=[
@@ -154,6 +175,25 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
             ],
         )
 
+    @router.post("/episodes", response_model=EpisodeOut, status_code=201)
+    async def store_episode(
+        body: EpisodeIn,
+        x_user_id: str | None = Header(default=None),
+    ) -> EpisodeOut:
+        """Persist a memory episode for the authenticated user.
+
+        Called by the ai-agents service when the agent decides to store
+        something worth remembering across sessions.
+        """
+        owner_id = _require_user(x_user_id)
+        episode_id = await service.add_episode(
+            owner_id=owner_id,
+            content=body.content,
+            source=_SOURCE_BY_TYPE[body.memory_type],
+            thread_id=body.thread_id,
+        )
+        return EpisodeOut(episode_id=episode_id)
+
     @router.delete("/memories", status_code=204)
     async def delete_memories(
         x_user_id: str | None = Header(default=None),
@@ -161,5 +201,25 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
         """Wipe all memory episodes for the authenticated user."""
         owner_id = _require_user(x_user_id)
         await service.delete_memories(owner_id=owner_id)
+
+    class ForgetIn(BaseModel):
+        query: str
+
+    class ForgetOut(BaseModel):
+        deleted: int
+
+    @router.post("/memories/forget", response_model=ForgetOut)
+    async def forget_memories(
+        body: ForgetIn,
+        x_user_id: str | None = Header(default=None),
+    ) -> ForgetOut:
+        """Search for episodes matching a query and delete them.
+
+        Called by the agent when the user says 'forget that X' or
+        'remove the memory about Y'.
+        """
+        owner_id = _require_user(x_user_id)
+        deleted = await service.forget(owner_id=owner_id, query=body.query)
+        return ForgetOut(deleted=deleted)
 
     return router

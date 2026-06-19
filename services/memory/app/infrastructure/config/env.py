@@ -18,6 +18,8 @@ class Env(BaseSettings):
     litellm_proxy_api_base: str
     litellm_proxy_api_key: str
     graphiti_llm_model: str = "gpt-4.1-mini"
+    graphiti_llm_small_model: str = "gpt-4.1-nano"
+    graphiti_llm_temperature: float = 0.0
 
     # Embedding model (must match vector dimension in Qdrant if used)
     embedding_model: str = "text-embedding-3-small"

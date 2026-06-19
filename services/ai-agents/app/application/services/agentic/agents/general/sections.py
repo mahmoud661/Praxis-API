@@ -23,7 +23,7 @@ from .prompts import EXECUTE_PROMPT, QUALIFY_PROMPT
 INITIAL_SECTION = "qualify"
 
 
-def build_sections(*, execute_tools: list[str]) -> dict[str, SectionConfig]:
+def build_sections(*, execute_tools: list) -> dict[str, SectionConfig]:
     """SectionConfig map for `SectionFlowMiddleware`."""
 
     return {

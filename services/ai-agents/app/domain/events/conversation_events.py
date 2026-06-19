@@ -24,6 +24,30 @@ def make_conversation_renamed(
     )
 
 
+def make_conversation_deleted(
+    *,
+    thread_id: str,
+    owner_id: str,
+    deleted_at: str,
+) -> DomainEvent:
+    """Build a ConversationDeleted domain event.
+
+    The memory service's ConversationDeletedProvisioner listens for this on
+    agents.events.v1 and marks the Conversation node as soft-deleted in Neo4j.
+    """
+    return DomainEvent(
+        metadata=DomainEvent.make_metadata(
+            event_name="ConversationDeleted",
+            aggregate_id=thread_id,
+        ),
+        payload={
+            "userId": owner_id,
+            "threadId": thread_id,
+            "deletedAt": deleted_at,
+        },
+    )
+
+
 def make_conversation_created(
     *,
     thread_id: str,

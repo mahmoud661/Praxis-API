@@ -18,6 +18,7 @@ from ......domain.IServices.i_knowledge_service import IKnowledgeService
 from ......domain.ports.content_reference_lookup import (
     IContentReferenceLookup,
 )
+from ......domain.ports.i_memory_client import IMemoryClient
 from ......domain.ports.document_extractor import IDocumentExtractor
 from ......domain.ports.logger import Logger
 from ......infrastructure.agentic.agentic_store import AgenticStore
@@ -56,6 +57,7 @@ class GeneralAgent(BaseAgent):
         files_service: IFilesService,
         document_extractor: IDocumentExtractor,
         knowledge_service: IKnowledgeService,
+        memory_client: IMemoryClient,
         content_reference_lookup: IContentReferenceLookup,
         captioner: AttachmentCaptioner,
         logger: Logger,
@@ -66,6 +68,7 @@ class GeneralAgent(BaseAgent):
         self._files = files_service
         self._extractor = document_extractor
         self._knowledge = knowledge_service
+        self._memory = memory_client
         self._content_ref_lookup = content_reference_lookup
         self._captioner = captioner
         self._logger = logger
@@ -85,6 +88,7 @@ class GeneralAgent(BaseAgent):
             document_extractor=self._extractor,
             captioner=self._captioner,
             knowledge_service=self._knowledge,
+            memory_client=self._memory,
             content_reference_lookup=self._content_ref_lookup,
             logger=self._logger,
         )

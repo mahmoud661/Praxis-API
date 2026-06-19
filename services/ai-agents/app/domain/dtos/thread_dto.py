@@ -42,9 +42,10 @@ class ThreadView:
     id: str
     owner_id: str
     title: str
-    created_at: str  # ISO-8601
-    updated_at: str  # ISO-8601
+    created_at: str   # ISO-8601
+    updated_at: str   # ISO-8601
     config: ThreadConfigView = field(default_factory=ThreadConfigView)
+    deleted_at: str | None = None  # ISO-8601, set on soft-delete; None = active
 
 
 @dataclass(frozen=True, slots=True)

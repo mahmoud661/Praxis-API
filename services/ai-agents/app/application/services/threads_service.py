@@ -31,7 +31,11 @@ from ...domain.dtos.thread_dto import (
     ThreadView,
 )
 from ...domain.IRepos.i_thread_repo import IThreadRepo
-from ...domain.events.conversation_events import make_conversation_created, make_conversation_renamed
+from ...domain.events.conversation_events import (
+    make_conversation_created,
+    make_conversation_deleted,
+    make_conversation_renamed,
+)
 from ...domain.ports.event_publisher import EventPublisher
 from ...domain.ports.logger import Logger
 from ...infrastructure.agentic.agentic_store import AgenticStore
@@ -99,17 +103,33 @@ class ThreadsService:
 
     async def get(self, *, thread_id: str, owner_id: str) -> ThreadView:
         thread = await self._repo.get(thread_id)
-        if thread is None or thread.owner_id != owner_id:
+        if thread is None or thread.owner_id != owner_id or thread.deleted_at is not None:
             raise ThreadNotFoundError(thread_id)
         return thread
 
     async def delete(self, *, thread_id: str, owner_id: str) -> None:
         # Ownership check first — same "404 on miss-or-foreign" rule.
         await self.get(thread_id=thread_id, owner_id=owner_id)
-        await self._repo.delete(thread_id)
-        # Note: checkpoint rows for this thread are NOT cleaned up here.
-        # LangGraph doesn't expose a bulk-delete API, and stale checkpoints
-        # are harmless (the thread row is gone, so nothing references them).
+        deleted_at = _now_iso()
+        await self._repo.soft_delete(thread_id)
+        # Notify the memory service so it can mark the Conversation node
+        # as disabled in Neo4j. Best-effort — a Kafka blip must not fail
+        # the delete response.
+        try:
+            await self._publisher.publish(
+                _AGENTS_TOPIC,
+                [make_conversation_deleted(
+                    thread_id=thread_id,
+                    owner_id=owner_id,
+                    deleted_at=deleted_at,
+                )],
+            )
+        except Exception as err:  # noqa: BLE001
+            self._logger.warning(
+                "thread.deleted.kafka_publish_failed",
+                thread_id=thread_id,
+                error=str(err),
+            )
         self._logger.info(
             "thread.deleted", thread_id=thread_id, owner_id=owner_id
         )

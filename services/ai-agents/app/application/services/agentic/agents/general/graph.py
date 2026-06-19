@@ -75,7 +75,7 @@ from ...react_agent.ports import AttachmentConfig
 from ...react_agent.tools import make_read_attachment_tool
 from .prompts import SYSTEM_PROMPT
 from .sections import INITIAL_SECTION, build_sections
-from .tools import make_kb_search_tool
+from .tools import make_kb_search_tool, make_memory_clear_tool, make_memory_forget_tool, make_memory_search_tool, make_memory_store_tool
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -86,6 +86,7 @@ if TYPE_CHECKING:
         IContentReferenceLookup,
     )
     from ......domain.ports.document_extractor import IDocumentExtractor
+    from ......domain.ports.i_memory_client import IMemoryClient
     from ......domain.ports.logger import Logger
     from ......infrastructure.agentic.agentic_store import AgenticStore
     from ......infrastructure.config.env import Env
@@ -104,6 +105,7 @@ def build_graph(
     document_extractor: "IDocumentExtractor",
     captioner: "AttachmentCaptioner",
     knowledge_service: "IKnowledgeService",
+    memory_client: "IMemoryClient",
     content_reference_lookup: "IContentReferenceLookup",
     logger: "Logger",
 ) -> "CompiledStateGraph":
@@ -135,10 +137,14 @@ def build_graph(
             knowledge_service=knowledge_service,
             agentic_store=agentic_store,
         ),
+        make_memory_search_tool(memory_client=memory_client),
+        make_memory_store_tool(memory_client=memory_client),
+        make_memory_forget_tool(memory_client=memory_client),
+        make_memory_clear_tool(memory_client=memory_client),
     ]
 
     section_flow = SectionFlowMiddleware(
-        sections=build_sections(execute_tools=[t.name for t in tools]),
+        sections=build_sections(execute_tools=tools),
         initial_section=INITIAL_SECTION,
     )
 

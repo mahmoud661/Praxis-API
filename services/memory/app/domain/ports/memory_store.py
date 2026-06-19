@@ -11,6 +11,7 @@ class Episode:
     content: str
     source: str                          # "conversation" | "document" | "web"
     id: str = ""
+    thread_id: str = ""                  # originating conversation thread
     created_at: datetime = field(default_factory=datetime.utcnow)
 
 
@@ -28,6 +29,7 @@ class MemorySearchHit:
     score: float
     source: str
     entities: list[str] = field(default_factory=list)
+    thread_name: str = ""
 
 
 @dataclass
@@ -36,6 +38,7 @@ class GraphNode:
     name: str
     type: str                            # entity type label
     summary: str = ""
+    deleted_at: str | None = None        # ISO-8601 when soft-deleted; None = active
 
 
 @dataclass
@@ -115,6 +118,20 @@ class IMemoryStore(Protocol):
         relationship: str,
     ) -> None:
         """Create a directed relationship between two existing entity nodes."""
+        pass
+
+    async def soft_delete_entity(
+        self,
+        *,
+        owner_id: str,
+        entity_id: str,
+        deleted_at: str,
+    ) -> None:
+        """Mark an entity node as soft-deleted (sets deleted_at timestamp)."""
+        pass
+
+    async def delete_episodes(self, *, owner_id: str, episode_ids: list[str]) -> int:
+        """Delete specific episodes by id. Returns count deleted."""
         pass
 
     async def delete_by_owner(self, *, owner_id: str) -> None:

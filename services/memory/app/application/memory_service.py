@@ -23,7 +23,7 @@ class MemoryService:
         self._logger = logger
 
     async def add_episode(
-        self, *, owner_id: str, content: str, source: str = "conversation"
+        self, *, owner_id: str, content: str, source: str = "conversation", thread_id: str | None = None
     ) -> str:
         content = content.strip()
         if not content:
@@ -33,6 +33,7 @@ class MemoryService:
             owner_id=owner_id,
             content=content,
             source=source,
+            thread_id=thread_id or "",
         )
         episode_id = await self._store.add_episode(episode)
         self._logger.info("memory.episode_added", owner_id=owner_id, source=source)
@@ -143,6 +144,38 @@ class MemoryService:
             to_entity_id=to_entity_id,
             relationship=relationship,
         )
+
+    async def soft_delete_entity(
+        self,
+        *,
+        owner_id: str,
+        entity_id: str,
+        deleted_at: str,
+    ) -> None:
+        """Mark an entity node as soft-deleted in the knowledge graph."""
+        await self._store.soft_delete_entity(
+            owner_id=owner_id,
+            entity_id=entity_id,
+            deleted_at=deleted_at,
+        )
+        self._logger.info(
+            "memory.entity_soft_deleted",
+            owner_id=owner_id,
+            entity_id=entity_id,
+        )
+
+    async def forget(self, *, owner_id: str, query: str) -> int:
+        """Search for episodes matching query and delete matching ones.
+        Returns the number of episodes deleted."""
+        hits = await self._store.search(owner_id=owner_id, query=query, k=5)
+        if not hits:
+            return 0
+        deleted = await self._store.delete_episodes(
+            owner_id=owner_id,
+            episode_ids=[h.episode_id for h in hits if h.episode_id],
+        )
+        self._logger.info("memory.forgotten", owner_id=owner_id, deleted=deleted)
+        return deleted
 
     async def delete_memories(self, *, owner_id: str) -> None:
         await self._store.delete_by_owner(owner_id=owner_id)

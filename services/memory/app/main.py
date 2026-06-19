@@ -26,6 +26,8 @@ def create_app() -> FastAPI:
         llm_api_key=env.litellm_proxy_api_key,
         llm_model=env.graphiti_llm_model,
         llm_base_url=env.litellm_proxy_api_base,
+        llm_temperature=env.graphiti_llm_temperature,
+        llm_small_model=env.graphiti_llm_small_model,
         embedding_model=env.embedding_model,
     )
     service = MemoryService(store=store, logger=logger)
