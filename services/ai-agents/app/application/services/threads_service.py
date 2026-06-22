@@ -32,11 +32,11 @@ from ...domain.dtos.thread_dto import (
 )
 from ...domain.IRepos.i_thread_repo import IThreadRepo
 from ...domain.events.conversation_events import (
-    make_conversation_created,
     make_conversation_deleted,
     make_conversation_renamed,
 )
 from ...domain.ports.event_publisher import EventPublisher
+from ...domain.ports.i_memory_client import IMemoryClient
 from ...domain.ports.logger import Logger
 from ...infrastructure.agentic.agentic_store import AgenticStore
 from ...infrastructure.ai.title_generator import TitleGenerator
@@ -64,6 +64,7 @@ class ThreadsService:
         logger: Logger,
         agent_registry: AgentRegistry,
         event_publisher: EventPublisher,
+        memory_client: IMemoryClient,
     ) -> None:
         # Resolved by the container by annotation class name.
         self._repo = thread_repo
@@ -73,6 +74,7 @@ class ThreadsService:
         self._logger = logger
         self._registry = agent_registry
         self._publisher = event_publisher
+        self._memory = memory_client
 
     async def create(
         self, *, owner_id: str, title: str | None = None
@@ -86,13 +88,24 @@ class ThreadsService:
             updated_at=now,
         )
         await self._repo.upsert(thread)
-        event = make_conversation_created(
-            thread_id=thread.id,
-            owner_id=owner_id,
-            title=thread.title,
-            created_at=thread.created_at,
-        )
-        await self._publisher.publish(_AGENTS_TOPIC, [event])
+        # Register the conversation node directly in the knowledge graph.
+        # Fire-and-forget: a failure here must not break thread creation.
+        try:
+            await self._memory.provision_node(
+                type="conversation",
+                id=thread.id,
+                name=thread.title,
+                owner_id=owner_id,
+                summary="AI conversation thread",
+            )
+            await self._memory.provision_link(
+                from_id=owner_id,
+                to_id=thread.id,
+                owner_id=owner_id,
+                relationship="PARTICIPATED_IN",
+            )
+        except Exception:  # noqa: BLE001
+            self._logger.warning("thread.provision_memory_failed", thread_id=thread.id)
         self._logger.info(
             "thread.created", thread_id=thread.id, owner_id=owner_id
         )

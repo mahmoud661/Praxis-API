@@ -201,6 +201,10 @@ class RunManager:
 
         # No active run — kick one off now.
         await self._redis.sadd(_running_set_key(owner_id), thread_id)
+        # TTL on the running set — if the service crashes mid-run, Redis
+        # auto-expires the key after 2 h so the sidebar never shows a
+        # permanently-stuck indicator. Normal flow removes the entry via srem.
+        await self._redis.expire(_running_set_key(owner_id), 7200)
         await self._publish_notification(
             owner_id,
             {"type": "run.started", "thread_id": thread_id, "at": _now_iso()},

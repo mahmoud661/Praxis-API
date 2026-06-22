@@ -403,6 +403,7 @@ class GraphitiMemoryStore:
                 MATCH (n:Entity)
                 WHERE n.group_id = $group_id
                 RETURN toString(id(n)) AS id,
+                       n.uuid AS uuid,
                        n.name AS name,
                        labels(n) AS labels,
                        n.summary AS summary,
@@ -438,6 +439,7 @@ class GraphitiMemoryStore:
                     name=rec.get("name", ""),
                     type=type_labels[0] if type_labels else "Entity",
                     summary=rec.get("summary", ""),
+                    uuid=rec.get("uuid") or "",
                     deleted_at=str(raw_deleted) if raw_deleted is not None else None,
                 )
             )

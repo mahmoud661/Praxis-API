@@ -13,6 +13,7 @@ from .infrastructure.messaging.kafka_event_consumer import KafkaEventConsumer
 from .presentation.event_handlers.provision_handler import make_provisioner_handler
 from .presentation.mcp_server import make_mcp_server
 from .presentation.routes.knowledge_route import make_knowledge_router
+from .presentation.routes.provision_route import make_provision_router
 
 
 def create_app() -> FastAPI:
@@ -64,6 +65,9 @@ def create_app() -> FastAPI:
 
     # REST endpoints — gateway proxies /v1/knowledge/* here.
     app.include_router(make_knowledge_router(service))
+    # Provision endpoints — called by other services (auth, ai-agents, etc.)
+    # to register their domain entities in the knowledge graph.
+    app.include_router(make_provision_router(service))
 
     @app.get("/healthz")
     async def healthz() -> dict:

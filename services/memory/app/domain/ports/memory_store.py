@@ -38,6 +38,7 @@ class GraphNode:
     name: str
     type: str                            # entity type label
     summary: str = ""
+    uuid: str = ""                       # Neo4j node uuid (file_id for Attachment/Image)
     deleted_at: str | None = None        # ISO-8601 when soft-deleted; None = active
 
 

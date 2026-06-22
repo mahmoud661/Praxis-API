@@ -490,7 +490,8 @@ def _build_summarization_messages(
 def _generate_summary(model, messages: list, custom_instructions: str | None = None) -> str:
     prompt = _build_compact_prompt(custom_instructions)
     llm_messages = _build_summarization_messages(messages, prompt)
-    response = model.invoke(llm_messages)
+    # "no_stream" tag prevents this internal LLM call from leaking into the chat UI stream.
+    response = model.invoke(llm_messages, config={"tags": ["no_stream"]})
     raw = response.content if isinstance(response.content, str) else str(response.content)
     return _strip_scratchpad(raw)
 
@@ -498,7 +499,8 @@ def _generate_summary(model, messages: list, custom_instructions: str | None = N
 async def _agenerate_summary(model, messages: list, custom_instructions: str | None = None) -> str:
     prompt = _build_compact_prompt(custom_instructions)
     llm_messages = _build_summarization_messages(messages, prompt)
-    response = await model.ainvoke(llm_messages)
+    # "no_stream" tag prevents this internal LLM call from leaking into the chat UI stream.
+    response = await model.ainvoke(llm_messages, config={"tags": ["no_stream"]})
     raw = response.content if isinstance(response.content, str) else str(response.content)
     return _strip_scratchpad(raw)
 

@@ -102,6 +102,7 @@ def _service(
         file_storage=InMemoryFileStorage(),
         agentic_store=_FakeAgenticStore(),  # type: ignore[arg-type]
         knowledge_service=ks,
+        memory_client=_FakeLogger(),  # type: ignore[arg-type]
         logger=_FakeLogger(),
     )
     return svc, ks

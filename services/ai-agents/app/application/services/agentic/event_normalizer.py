@@ -78,11 +78,23 @@ _DROPPED = {
 }
 
 
+# Tags that mark internal / infrastructure LLM calls that must never reach
+# the chat UI. Any event whose `tags` list contains one of these is dropped.
+_INTERNAL_TAGS = {"no_stream", "no_ui", "internal"}
+
+
 def normalize_event(raw: dict[str, Any]) -> dict[str, Any] | None:
     """Translate one LC event into the wire envelope, or `None` if the event
     should be filtered."""
     name = raw.get("event")
     if not name or name in _DROPPED:
+        return None
+
+    # Drop events from internal infrastructure nodes (compaction, subagents,
+    # summarization). These are tagged in the RunnableConfig that kicked them
+    # off; LangGraph propagates config tags onto every child event.
+    event_tags: list[str] = raw.get("tags") or []
+    if _INTERNAL_TAGS.intersection(event_tags):
         return None
 
     out: dict[str, Any] = {

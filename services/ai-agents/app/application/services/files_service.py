@@ -33,6 +33,7 @@ from uuid import uuid4
 
 from ...domain.dtos.file_dto import FileView
 from ...domain.IServices.i_knowledge_service import IKnowledgeService
+from ...domain.ports.i_memory_client import IMemoryClient
 from ...domain.ports.logger import Logger
 from ...infrastructure.agentic.agentic_store import AgenticStore
 from ...infrastructure.files.file_storage import (
@@ -94,11 +95,13 @@ class FilesService:
         file_storage: IFileStorage,
         agentic_store: AgenticStore,
         knowledge_service: IKnowledgeService,
+        memory_client: IMemoryClient,
         logger: Logger,
     ) -> None:
         self._storage = file_storage
         self._agentic = agentic_store
         self._knowledge = knowledge_service
+        self._memory = memory_client
         self._logger = logger
         # Strong references to in-flight fire-and-forget ingestion
         # tasks. asyncio only holds a WEAK reference to a bare
@@ -142,6 +145,17 @@ class FilesService:
             mime_type=mime_type,
             size=len(data),
         )
+        # Register in knowledge graph — fire-and-forget, strong reference kept so GC
+        # can't collect the task before it completes (same pattern as _ingest_safely).
+        _ptask = asyncio.create_task(self._provision_in_graph(
+            file_id=file_id,
+            owner_id=owner_id,
+            filename=filename,
+            mime_type=mime_type,
+            size_bytes=len(data),
+        ))
+        self._ingest_tasks.add(_ptask)
+        _ptask.add_done_callback(self._ingest_tasks.discard)
         # Fire-and-forget ingestion into the knowledge base. We don't
         # block the upload response on it — chunking + embedding can
         # take a few seconds for a big PDF, and the user shouldn't wait
@@ -175,6 +189,28 @@ class FilesService:
             size_bytes=len(data),
             created_at=created_at,
         )
+
+    async def _provision_in_graph(
+        self,
+        *,
+        file_id: str,
+        owner_id: str,
+        filename: str,
+        mime_type: str,
+        size_bytes: int,
+    ) -> None:
+        entity_type = "image" if mime_type.startswith("image/") else "attachment"
+        size_kb = size_bytes // 1024 or 1
+        try:
+            await self._memory.provision_node(
+                type=entity_type,
+                id=file_id,
+                name=filename,
+                owner_id=owner_id,
+                summary=f"{mime_type} · {size_kb} KB",
+            )
+        except Exception:  # noqa: BLE001
+            self._logger.warning("file.graph_provision_failed", file_id=file_id)
 
     async def _ingest_safely(
         self,

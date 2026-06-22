@@ -28,6 +28,7 @@ from langchain_core.messages import HumanMessage
 
 from ....application.services._errors import FileNotFoundError
 from ....domain.IServices.i_files_service import IFilesService
+from ....domain.ports.i_memory_client import IMemoryClient
 from ....domain.ports.logger import Logger
 from .agent_registry import AgentRegistry
 from .event_normalizer import normalize_event
@@ -40,6 +41,7 @@ class AgentRunner:
         self,
         agent_registry: AgentRegistry,
         files: IFilesService,
+        memory_client: IMemoryClient,
         logger: Logger,
     ) -> None:
         # The runner's only entry into the agentic stack is through an
@@ -53,6 +55,7 @@ class AgentRunner:
         # still tells the UI "this was attached: report.pdf").
         self._registry = agent_registry
         self._files = files
+        self._memory = memory_client
         self._logger = logger
 
     async def run(
@@ -88,6 +91,19 @@ class AgentRunner:
                 "attachments": attachment_ids,
             }
         }
+        # Link each attachment to this conversation in the knowledge graph.
+        # Fire-and-forget — a failure must not block the agent run.
+        for file_id in attachment_ids:
+            try:
+                await self._memory.provision_link(
+                    from_id=thread_id,
+                    to_id=file_id,
+                    owner_id=owner_id,
+                    relationship="HAS_ATTACHMENT",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
         # Snapshot file metadata into the message itself so reloaded
         # history can render attachment chips without an extra round-
         # trip per file, AND so the chip still shows even if the file

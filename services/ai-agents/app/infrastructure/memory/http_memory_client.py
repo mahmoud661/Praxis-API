@@ -69,6 +69,28 @@ class HttpMemoryClient:
         r.raise_for_status()
         return r.json().get("deleted", 0)
 
+    async def provision_node(
+        self, *, type: str, id: str, name: str, owner_id: str, summary: str = "", thread_id: str | None = None
+    ) -> None:
+        r = await self._http.post(
+            "/provision",
+            json={"type": type, "id": id, "name": name, "owner_id": owner_id, "summary": summary},
+        )
+        r.raise_for_status()
+        if thread_id:
+            await self.provision_link(
+                from_id=thread_id, to_id=id, owner_id=owner_id, relationship="HAS_ATTACHMENT"
+            )
+
+    async def provision_link(
+        self, *, from_id: str, to_id: str, owner_id: str, relationship: str
+    ) -> None:
+        r = await self._http.post(
+            "/provision/link",
+            json={"from_id": from_id, "to_id": to_id, "owner_id": owner_id, "relationship": relationship},
+        )
+        r.raise_for_status()
+
     async def clear(self, *, owner_id: str) -> None:
         r = await self._http.delete(
             "/knowledge/memories",

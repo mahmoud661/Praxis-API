@@ -78,6 +78,7 @@ class GraphNodeOut(BaseModel):
     name: str
     type: str
     summary: str
+    uuid: str = ""
     deleted_at: str | None = None
 
 
@@ -166,7 +167,7 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
         graph = await service.get_graph(owner_id=owner_id, limit=limit)
         return KnowledgeGraphOut(
             nodes=[
-                GraphNodeOut(id=n.id, name=n.name, type=n.type, summary=n.summary, deleted_at=n.deleted_at)
+                GraphNodeOut(id=n.id, name=n.name, type=n.type, summary=n.summary, uuid=n.uuid, deleted_at=n.deleted_at)
                 for n in graph.nodes
             ],
             edges=[

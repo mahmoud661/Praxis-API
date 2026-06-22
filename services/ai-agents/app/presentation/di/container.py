@@ -297,6 +297,7 @@ def register_dependencies() -> Container:
         AgentRunner(
             registry,
             container.resolve("IFilesService"),
+            container.resolve("IMemoryClient"),
             logger,
         ),
     )

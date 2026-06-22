@@ -27,5 +27,15 @@ class IMemoryClient(Protocol):
     async def forget(self, *, owner_id: str, query: str) -> int:
         """Search for memories matching query and delete them. Returns count deleted."""
 
+    async def provision_node(
+        self, *, type: str, id: str, name: str, owner_id: str, summary: str = "", thread_id: str | None = None
+    ) -> None:
+        """Upsert an entity node and optionally link it to a thread."""
+
+    async def provision_link(
+        self, *, from_id: str, to_id: str, owner_id: str, relationship: str
+    ) -> None:
+        """Create a directed relationship between two entity nodes."""
+
     async def clear(self, *, owner_id: str) -> None:
         """Wipe all memory episodes and entities for this user."""

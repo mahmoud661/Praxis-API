@@ -46,6 +46,7 @@ class _Redis:
     def __init__(self) -> None:
         self.sadd = AsyncMock(return_value=1)
         self.srem = AsyncMock(return_value=1)
+        self.expire = AsyncMock(return_value=1)
         self.publish = AsyncMock(return_value=0)
         self.smembers = AsyncMock(return_value=set())
 
