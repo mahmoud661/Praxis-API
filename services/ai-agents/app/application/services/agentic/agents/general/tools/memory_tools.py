@@ -148,28 +148,6 @@ def make_memory_forget_tool(*, memory_client: "IMemoryClient") -> BaseTool:
     return memory_forget
 
 
-def make_memory_clear_tool(*, memory_client: "IMemoryClient") -> BaseTool:
-    """Return the `memory_clear` tool with `memory_client` in its closure."""
-
-    @tool
-    async def memory_clear(config: RunnableConfig) -> str:
-        """Wipe ALL of the user's long-term memory — episodes, entities, and graph.
-
-        Only call this when the user explicitly asks to clear, reset, or forget
-        all their memories (e.g. "clear my memory", "reset my knowledge graph",
-        "forget everything about me"). This is irreversible.
-        """
-        owner_id = _owner_id(config)
-        if owner_id is None:
-            return "[tool error] missing owner_id — cannot clear memory."
-        try:
-            await memory_client.clear(owner_id=owner_id)
-        except Exception as exc:  # noqa: BLE001
-            return f"[tool error] memory clear failed: {exc}"
-        return "Memory cleared. All episodes and entities have been wiped."
-
-    return memory_clear
-
 
 def _owner_id(config: RunnableConfig | None) -> str | None:
     if not isinstance(config, dict):

@@ -41,9 +41,7 @@ EXECUTE_PROMPT = (
     "Use memory_type='semantic' for durable facts/preferences and "
     "'episodic' for events or interactions that happened. "
     "Call `memory_forget` when the user says 'forget that X', 'that's wrong "
-    "remove it', or 'delete the memory about Y' — it deletes matching episodes. "
-    "Call `memory_clear` ONLY when the user explicitly asks to clear, "
-    "reset, or forget ALL their memories — this is irreversible."
+    "remove it', or 'delete the memory about Y' — it deletes matching episodes."
 )
 
 __all__ = ["SYSTEM_PROMPT", "QUALIFY_PROMPT", "EXECUTE_PROMPT"]

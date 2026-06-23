@@ -37,5 +37,3 @@ class IMemoryClient(Protocol):
     ) -> None:
         """Create a directed relationship between two entity nodes."""
 
-    async def clear(self, *, owner_id: str) -> None:
-        """Wipe all memory episodes and entities for this user."""

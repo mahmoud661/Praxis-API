@@ -91,12 +91,5 @@ class HttpMemoryClient:
         )
         r.raise_for_status()
 
-    async def clear(self, *, owner_id: str) -> None:
-        r = await self._http.delete(
-            "/knowledge/memories",
-            headers={"x-user-id": owner_id},
-        )
-        r.raise_for_status()
-
     async def aclose(self) -> None:
         await self._http.aclose()

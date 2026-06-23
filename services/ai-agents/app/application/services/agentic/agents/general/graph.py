@@ -75,7 +75,12 @@ from ...react_agent.ports import AttachmentConfig
 from ...react_agent.tools import make_read_attachment_tool
 from .prompts import SYSTEM_PROMPT
 from .sections import INITIAL_SECTION, build_sections
-from .tools import make_kb_search_tool, make_memory_clear_tool, make_memory_forget_tool, make_memory_search_tool, make_memory_store_tool
+from .tools import (
+    make_kb_search_tool,
+    make_memory_forget_tool,
+    make_memory_search_tool,
+    make_memory_store_tool,
+)
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -140,7 +145,6 @@ def build_graph(
         make_memory_search_tool(memory_client=memory_client),
         make_memory_store_tool(memory_client=memory_client),
         make_memory_forget_tool(memory_client=memory_client),
-        make_memory_clear_tool(memory_client=memory_client),
     ]
 
     section_flow = SectionFlowMiddleware(
