@@ -15,6 +15,26 @@ from datetime import datetime, timezone
 from pydantic import BaseModel
 
 
+class Person(BaseModel):
+    """A human being — the user themselves, a colleague, friend, family member, or public figure."""
+
+
+class Organization(BaseModel):
+    """A company, institution, team, government body, or any named group of people."""
+
+
+class Place(BaseModel):
+    """A geographic location — country, city, region, landmark, or physical place."""
+
+
+class Concept(BaseModel):
+    """An abstract idea, technology, framework, methodology, skill, or domain of knowledge."""
+
+
+class Event(BaseModel):
+    """A specific occurrence that happened or is planned — a meeting, project, deadline, or milestone."""
+
+
 class Preference(BaseModel):
     """A preference, taste, like, dislike, or habitual behavior of the user."""
 
@@ -24,8 +44,13 @@ class Fact(BaseModel):
 
 
 _ENTITY_TYPES: dict[str, type[BaseModel]] = {
-    "Preference": Preference,
-    "Fact": Fact,
+    "Person":       Person,
+    "Organization": Organization,
+    "Place":        Place,
+    "Concept":      Concept,
+    "Event":        Event,
+    "Preference":   Preference,
+    "Fact":         Fact,
 }
 
 
@@ -122,15 +147,19 @@ class GraphitiMemoryStore:
         # entity is still named by email (contains @) and the episode contains
         # a name-claim phrase, rename the user node so all future episodes use
         # the real name as the speaker prefix and dedup correctly.
+        promoted = False
         if user_name and "@" in user_name:
-            await self._maybe_promote_user_name(
+            promoted = await self._maybe_promote_user_name(
                 owner_id=episode.owner_id,
                 episode_id=episode_id,
                 current_name=user_name,
                 content=episode.content,
             )
-        # Merge duplicate user-name nodes so the graph stays clean.
-        await self._merge_duplicate_user_nodes(owner_id=episode.owner_id)
+        # Merge duplicate user-name nodes — only needed right after a name
+        # promotion, since that's the only moment a new node with the same
+        # name can have been created by Graphiti's extraction.
+        if promoted:
+            await self._merge_duplicate_user_nodes(owner_id=episode.owner_id)
         # Link all entities extracted from this episode to the originating
         # conversation thread node via a DISCUSSED_IN edge.
         if episode.thread_id:
@@ -148,25 +177,28 @@ class GraphitiMemoryStore:
         episode_id: str,
         current_name: str,
         content: str,
-    ) -> None:
+    ) -> bool:
         """If a name-claim is detected in the content, update the user's entity
-        node name to the stated name so future episodes link correctly."""
+        node name to the stated name so future episodes link correctly.
+        Returns True if the name was actually changed."""
         import re
-        # Match "my name is X" or "call me X" only — not "I am a developer" etc.
-        # Name must be 1–3 proper-cased words, no articles/prepositions.
+        # Match "my name is X" or "call me X" — case-insensitive so
+        # "my name is mahmoud" works as well as "My name is Mahmoud".
+        # Name must be 1–3 words; stop words filtered after capture.
         _STOP = {"a", "an", "the", "not", "also", "just", "very", "quite"}
         pattern = re.compile(
-            r"(?:my name is|call me)\s+([A-Z][A-Za-z'-](?:[A-Za-z'-]+)?"
-            r"(?:\s+[A-Z][A-Za-z'-]+){0,2})",
+            r"(?:my name is|call me)\s+([A-Za-z][A-Za-z'-]+(?:\s+[A-Za-z][A-Za-z'-]+){0,2})",
+            re.IGNORECASE,
         )
         match = pattern.search(content)
         if not match:
-            return
-        claimed_name = match.group(1).strip().rstrip(".,!?")
+            return False
+        # Title-case so "mahmoud zuriqi" → "Mahmoud Zuriqi" in the graph.
+        claimed_name = match.group(1).strip().rstrip(".,!?").title()
         if (not claimed_name or len(claimed_name) < 2
                 or claimed_name.lower() in _STOP
                 or claimed_name.lower() == current_name.lower()):
-            return
+            return False
         driver = self._graphiti.driver
         async with driver.session() as session:
             await session.run(
@@ -174,6 +206,7 @@ class GraphitiMemoryStore:
                 uuid=owner_id,
                 name=claimed_name,
             )
+        return True
 
     async def _merge_duplicate_user_nodes(self, *, owner_id: str) -> None:
         """Collapse all entity nodes that share the user's current display name
@@ -282,7 +315,12 @@ class GraphitiMemoryStore:
                 getattr(n, "name", str(n))
                 for n in getattr(r, "relevant_schema", {}).get("nodes", [])
             ]
-            episode_id = getattr(r, "uuid", "") or getattr(r, "name", "")
+            # Prefer `name` over `uuid`: we store our generated episode_id as
+            # the Graphiti episode `name` (add_episode(name=episode_id, ...)).
+            # `r.uuid` is Graphiti's internal UUID and does NOT match the
+            # `{name: eid}` clause in delete_episodes — using uuid here was
+            # causing forget() to silently delete nothing.
+            episode_id = getattr(r, "name", "") or getattr(r, "uuid", "")
             episode_ids.append(episode_id)
             hits.append(
                 MemorySearchHit(
@@ -305,7 +343,11 @@ class GraphitiMemoryStore:
     async def _fetch_thread_names(
         self, *, owner_id: str, episode_ids: list[str]
     ) -> dict[str, str]:
-        """Return {episode_id: conversation_name} for each episode."""
+        """Return {episode_id: conversation_name} for each episode.
+
+        Uses path traversal (ep)-[:MENTIONS]->(entity)-[:DISCUSSED_IN]->(conv)
+        instead of a cross-product filter so Neo4j uses index-backed hops.
+        """
         if not episode_ids:
             return {}
         driver = self._graphiti.driver
@@ -314,9 +356,8 @@ class GraphitiMemoryStore:
                 """
                 UNWIND $ids AS eid
                 MATCH (ep:Episodic {name: eid, group_id: $owner_id})
-                OPTIONAL MATCH (entity:Entity {group_id: $owner_id})
-                  -[:DISCUSSED_IN]->(conv:Entity)
-                  WHERE (ep)-[:MENTIONS]->(entity)
+                OPTIONAL MATCH (ep)-[:MENTIONS]->(entity:Entity)
+                              -[:DISCUSSED_IN]->(conv:Entity)
                 RETURN eid AS episode_id,
                        collect(DISTINCT conv.name)[0] AS thread_name
                 """,
@@ -373,6 +414,7 @@ class GraphitiMemoryStore:
                 MATCH (n:Entity)
                 WHERE n.group_id = $group_id
                 RETURN n.name AS name, labels(n) AS labels, n.summary AS summary
+                ORDER BY n.name ASC
                 LIMIT $limit
                 """,
                 group_id=owner_id,
@@ -415,17 +457,18 @@ class GraphitiMemoryStore:
             )
             node_records = await node_result.data()
 
-            # Fetch relationships between entities belonging to this owner
+            # Fetch relationships — use a much higher cap than nodes so a
+            # dense graph doesn't appear artificially disconnected.
             edge_result = await session.run(
                 """
                 MATCH (a:Entity {group_id: $group_id})-[r]->(b:Entity {group_id: $group_id})
                 RETURN toString(id(a)) AS src_id,
                        toString(id(b)) AS tgt_id,
                        coalesce(r.name, type(r)) AS rel_type
-                LIMIT $limit
+                LIMIT $edge_limit
                 """,
                 group_id=owner_id,
-                limit=limit,
+                edge_limit=limit * 10,
             )
             edge_records = await edge_result.data()
 
@@ -471,11 +514,12 @@ class GraphitiMemoryStore:
                 """
                 MERGE (u:Entity {uuid: $uuid})
                 ON CREATE SET
-                    u.name      = $name,
-                    u.group_id  = $group_id,
-                    u.summary   = $summary,
-                    u.created_at = $created_at
-                ON MATCH SET u.name = $name
+                    u.name        = $name,
+                    u.group_id    = $group_id,
+                    u.summary     = $summary,
+                    u.created_at  = $created_at,
+                    u.provisioned = true
+                ON MATCH SET u.name = $name, u.provisioned = true
                 WITH u SET u:Person
                 """,
                 uuid=owner_id,
@@ -507,11 +551,12 @@ class GraphitiMemoryStore:
                 f"""
                 MERGE (e:Entity {{uuid: $uuid}})
                 ON CREATE SET
-                    e.name       = $name,
-                    e.group_id   = $group_id,
-                    e.summary    = $summary,
-                    e.created_at = $created_at
-                ON MATCH SET e.name = $name
+                    e.name        = $name,
+                    e.group_id    = $group_id,
+                    e.summary     = $summary,
+                    e.created_at  = $created_at,
+                    e.provisioned = true
+                ON MATCH SET e.name = $name, e.provisioned = true
                 WITH e SET e:`{entity_type}`
                 """,
                 uuid=entity_id,
@@ -589,10 +634,34 @@ class GraphitiMemoryStore:
             )
 
     async def delete_episodes(self, *, owner_id: str, episode_ids: list[str]) -> int:
-        """Delete specific Episodic nodes and their orphaned entity nodes."""
+        """Delete specific Episodic nodes and clean up entity nodes that become
+        orphaned (no remaining MENTIONS from any episode, not provisioned)."""
         driver = self._graphiti.driver
         async with driver.session() as session:
-            result = await session.run(
+            # Step 1: collect entity node IDs mentioned only by these episodes
+            # before we sever the edges, so we know what to clean up.
+            orphan_result = await session.run(
+                """
+                UNWIND $ids AS eid
+                MATCH (ep:Episodic {name: eid, group_id: $owner_id})
+                      -[:MENTIONS]->(entity:Entity)
+                WHERE (entity.provisioned IS NULL OR entity.provisioned = false)
+                WITH entity
+                WHERE NOT EXISTS {
+                    MATCH (other:Episodic {group_id: $owner_id})
+                          -[:MENTIONS]->(entity)
+                    WHERE NOT other.name IN $ids
+                }
+                RETURN collect(id(entity)) AS orphan_ids
+                """,
+                ids=episode_ids,
+                owner_id=owner_id,
+            )
+            orphan_record = await orphan_result.single()
+            orphan_ids: list[int] = (orphan_record["orphan_ids"] if orphan_record else []) or []
+
+            # Step 2: delete the episodes themselves.
+            del_result = await session.run(
                 """
                 UNWIND $ids AS eid
                 MATCH (ep:Episodic {name: eid, group_id: $owner_id})
@@ -602,14 +671,39 @@ class GraphitiMemoryStore:
                 ids=episode_ids,
                 owner_id=owner_id,
             )
-            record = await result.single()
-            return record["deleted"] if record else 0
+            del_record = await del_result.single()
+            deleted = del_record["deleted"] if del_record else 0
+
+            # Step 3: delete orphaned entity nodes (no remaining episode links).
+            if orphan_ids:
+                await session.run(
+                    "UNWIND $ids AS nid MATCH (n) WHERE id(n) = nid DETACH DELETE n",
+                    ids=orphan_ids,
+                )
+
+            return deleted
 
     async def delete_by_owner(self, *, owner_id: str) -> None:
+        """Delete all episodic memory for this owner without touching provisioned
+        nodes (user entity, conversation/attachment nodes created by the platform).
+        Provisioned nodes carry `provisioned = true`; everything else is fair game.
+        """
         driver = self._graphiti.driver
         async with driver.session() as session:
+            # 1. Delete all Episodic nodes (the actual memory episodes).
             await session.run(
-                "MATCH (n {group_id: $group_id}) DETACH DELETE n",
+                "MATCH (n:Episodic {group_id: $group_id}) DETACH DELETE n",
+                group_id=owner_id,
+            )
+            # 2. Delete Entity nodes created by Graphiti extraction (not provisioned).
+            #    Provisioned nodes (user, conversation, attachment) have provisioned=true
+            #    and must survive so the user's identity stays intact.
+            await session.run(
+                """
+                MATCH (n:Entity {group_id: $group_id})
+                WHERE (n.provisioned IS NULL OR n.provisioned = false)
+                DETACH DELETE n
+                """,
                 group_id=owner_id,
             )
 

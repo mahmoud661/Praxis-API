@@ -12,12 +12,15 @@ for the memory service to react. Memory service stays a dumb graph store.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ...application.memory_service import MemoryService
+
+_SAFE_LABEL = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 
 router = APIRouter(prefix="/provision", tags=["provision"])
 
@@ -69,7 +72,13 @@ def make_provision_router(service: MemoryService) -> APIRouter:
         """
         label = _LABEL.get(body.type, "Entity")
         if body.type == "custom" and body.metadata.get("label"):
-            label = str(body.metadata["label"])
+            custom = str(body.metadata["label"])
+            if not _SAFE_LABEL.match(custom):
+                raise HTTPException(
+                    status_code=422,
+                    detail="custom label must be alphanumeric/underscore, 1-64 chars",
+                )
+            label = custom
 
         try:
             await service.provision_entity(

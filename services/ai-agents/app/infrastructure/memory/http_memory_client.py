@@ -24,7 +24,10 @@ class HttpMemoryClient:
     def __init__(self, env: Env) -> None:
         self._http = httpx.AsyncClient(
             base_url=env.memory_service_url.rstrip("/"),
-            timeout=15.0,
+            # Default timeout for fast ops (search, provision).
+            # store() overrides to 90 s — Graphiti runs LLM extraction which
+            # can take 30-60 s on complex content.
+            timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0),
         )
 
     async def search(
@@ -56,6 +59,8 @@ class HttpMemoryClient:
             "/knowledge/episodes",
             json=body,
             headers={"x-user-id": owner_id},
+            # Graphiti extraction involves an LLM call — give it time.
+            timeout=httpx.Timeout(connect=5.0, read=90.0, write=5.0, pool=5.0),
         )
         r.raise_for_status()
         return r.json().get("episode_id", "")

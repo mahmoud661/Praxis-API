@@ -22,12 +22,16 @@ class MemoryService:
         self._store = store
         self._logger = logger
 
+    _MAX_EPISODE_CHARS = 4000  # ~1000 tokens — keeps Graphiti extraction reliable
+
     async def add_episode(
         self, *, owner_id: str, content: str, source: str = "conversation", thread_id: str | None = None
     ) -> str:
         content = content.strip()
         if not content:
             return ""
+        if len(content) > self._MAX_EPISODE_CHARS:
+            content = content[: self._MAX_EPISODE_CHARS]
         episode = Episode(
             id=str(uuid.uuid4()),
             owner_id=owner_id,
@@ -165,14 +169,21 @@ class MemoryService:
         )
 
     async def forget(self, *, owner_id: str, query: str) -> int:
-        """Search for episodes matching query and delete matching ones.
-        Returns the number of episodes deleted."""
+        """Search for episodes matching query and delete only high-confidence matches.
+
+        A score threshold of 0.6 prevents loosely-related episodes from being
+        deleted when the user asks to forget something specific.
+        """
+        _FORGET_THRESHOLD = 0.6
         hits = await self._store.search(owner_id=owner_id, query=query, k=5)
         if not hits:
             return 0
+        relevant = [h for h in hits if h.score >= _FORGET_THRESHOLD and h.episode_id]
+        if not relevant:
+            return 0
         deleted = await self._store.delete_episodes(
             owner_id=owner_id,
-            episode_ids=[h.episode_id for h in hits if h.episode_id],
+            episode_ids=[h.episode_id for h in relevant],
         )
         self._logger.info("memory.forgotten", owner_id=owner_id, deleted=deleted)
         return deleted

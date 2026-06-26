@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Protocol
+
+
+def _utcnow() -> datetime:
+    return datetime.now(tz=timezone.utc)
 
 
 @dataclass
@@ -12,7 +16,7 @@ class Episode:
     source: str                          # "conversation" | "document" | "web"
     id: str = ""
     thread_id: str = ""                  # originating conversation thread
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=_utcnow)
 
 
 @dataclass

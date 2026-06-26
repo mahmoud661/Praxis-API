@@ -4,13 +4,13 @@ Long-term memory tools for the general agent.
 Three tools, one responsibility each:
   - memory_search  : retrieve relevant episodes/facts from Graphiti
   - memory_store   : persist something worth remembering across sessions
-  - memory_clear   : wipe all memories when the user explicitly requests it
+  - memory_forget  : delete specific memories the user wants removed
 
 `owner_id` comes from the LangChain `RunnableConfig` — same pattern as
 `kb_search` — so memory is always scoped to the right user without the
 agent having to pass it explicitly.
 
-Both are built via factory functions that capture the `IMemoryClient`
+All three are built via factory functions that capture the `IMemoryClient`
 in a closure, keeping DI plumbing out of the tool list.
 """
 from __future__ import annotations
@@ -111,7 +111,8 @@ def make_memory_store_tool(*, memory_client: "IMemoryClient") -> BaseTool:
                 thread_id=thread_id,
             )
         except Exception as exc:  # noqa: BLE001
-            return f"[tool error] memory store failed: {exc}"
+            detail = str(exc) or type(exc).__name__
+            return f"[tool error] memory store failed: {detail}"
         return f"Stored. episode_id={episode_id}"
 
     return memory_store
