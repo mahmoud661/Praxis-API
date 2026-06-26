@@ -78,6 +78,7 @@ from .sections import INITIAL_SECTION, build_sections
 from .tools import (
     make_kb_search_tool,
     make_memory_forget_tool,
+    make_memory_graph_search_tool,
     make_memory_search_tool,
     make_memory_store_tool,
 )
@@ -145,6 +146,7 @@ def build_graph(
         make_memory_search_tool(memory_client=memory_client),
         make_memory_store_tool(memory_client=memory_client),
         make_memory_forget_tool(memory_client=memory_client),
+        make_memory_graph_search_tool(memory_client=memory_client),
     ]
 
     section_flow = SectionFlowMiddleware(

@@ -4,9 +4,10 @@ REST routes for the knowledge page frontend.
 All routes read X-User-Id forwarded by the gateway after session auth —
 the memory service never issues or validates sessions itself.
 """
+import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from ...application.memory_service import MemoryService
@@ -124,11 +125,12 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
     async def search_knowledge(
         q: str = Query(min_length=1),
         k: int = Query(default=10, ge=1, le=50),
+        source: str | None = Query(default=None, description="Filter by source_description ('fact' or 'conversation')"),
         x_user_id: str | None = Header(default=None),
     ) -> SearchResultsOut:
         """Hybrid graph+vector search across the user's knowledge base."""
         owner_id = _require_user(x_user_id)
-        hits = await service.search(owner_id=owner_id, query=q, k=k)
+        hits = await service.search(owner_id=owner_id, query=q, k=k, source_filter=source)
         return SearchResultsOut(
             hits=[
                 MemoryEpisodeOut(
@@ -179,21 +181,71 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
     @router.post("/episodes", response_model=EpisodeOut, status_code=201)
     async def store_episode(
         body: EpisodeIn,
+        background_tasks: BackgroundTasks,
         x_user_id: str | None = Header(default=None),
     ) -> EpisodeOut:
-        """Persist a memory episode for the authenticated user.
+        """Persist a memory episode — returns immediately, extracts async.
 
-        Called by the ai-agents service when the agent decides to store
-        something worth remembering across sessions.
+        Graphiti's LLM entity extraction runs in the background so the
+        caller (agent) is not blocked for the 30-60 s extraction window.
+        The episode_id is pre-assigned and stable; the episode appears in
+        search once extraction completes.
         """
         owner_id = _require_user(x_user_id)
-        episode_id = await service.add_episode(
+        episode_id = str(uuid.uuid4())
+        background_tasks.add_task(
+            service.add_episode,
             owner_id=owner_id,
             content=body.content,
             source=_SOURCE_BY_TYPE[body.memory_type],
             thread_id=body.thread_id,
+            episode_id=episode_id,
         )
         return EpisodeOut(episode_id=episode_id)
+
+    class ContextSummaryOut(BaseModel):
+        context: str
+
+    class GraphTripleOut(BaseModel):
+        subject: str
+        predicate: str
+        object: str
+        fact: str
+
+    class GraphTriplesOut(BaseModel):
+        triples: list[GraphTripleOut]
+
+    @router.get("/summary", response_model=ContextSummaryOut)
+    async def get_context_summary(
+        x_user_id: str | None = Header(default=None),
+    ) -> ContextSummaryOut:
+        """Compact context string about the user for agent injection.
+
+        Called by the agent runner before the first turn of a new thread to
+        prime the model with what it already knows about the user.
+        """
+        owner_id = _require_user(x_user_id)
+        context = await service.get_context_summary(owner_id=owner_id)
+        return ContextSummaryOut(context=context)
+
+    @router.get("/graph/context", response_model=GraphTriplesOut)
+    async def get_graph_context(
+        entity: str = Query(min_length=1, description="Entity name to look up"),
+        k: int = Query(default=10, ge=1, le=50),
+        x_user_id: str | None = Header(default=None),
+    ) -> GraphTriplesOut:
+        """Return RELATES_TO triples for entities matching the given name.
+
+        Used by the memory_graph_search agent tool to surface structured
+        relationship facts rather than raw episode excerpts.
+        """
+        owner_id = _require_user(x_user_id)
+        triples = await service.get_entity_triples(
+            owner_id=owner_id, entity_name=entity, k=k
+        )
+        return GraphTriplesOut(
+            triples=[GraphTripleOut(**t) for t in triples]
+        )
 
     @router.delete("/memories", status_code=204)
     async def delete_memories(

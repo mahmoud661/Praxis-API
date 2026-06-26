@@ -9,6 +9,7 @@ embeds the episode for hybrid retrieval.
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 
@@ -128,6 +129,25 @@ class GraphitiMemoryStore:
 
     async def add_episode(self, episode: Episode) -> str:
         episode_id = episode.id or str(uuid.uuid4())
+
+        # Deduplication: skip Graphiti extraction if identical content was
+        # already stored for this owner. The hash is set on the Episodic node
+        # after extraction so a second call with the same text is a no-op.
+        content_hash = hashlib.sha256(
+            f"{episode.owner_id}:{episode.content}".encode()
+        ).hexdigest()
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            dup = await session.run(
+                "MATCH (ep:Episodic {content_hash: $h, group_id: $g}) "
+                "RETURN ep.name AS name LIMIT 1",
+                h=content_hash,
+                g=episode.owner_id,
+            )
+            dup_record = await dup.single()
+            if dup_record:
+                return dup_record["name"]
+
         user_name = await self._get_entity_name(episode.owner_id)
         # Prefix with the user's known entity name so Graphiti's extract_message
         # prompt extracts them as the speaker and deduplicates against the
@@ -142,6 +162,16 @@ class GraphitiMemoryStore:
             group_id=episode.owner_id,
             entity_types=_ENTITY_TYPES,
         )
+        # Stamp the content hash so duplicate calls with the same content
+        # are caught before extraction next time.
+        async with driver.session() as session:
+            await session.run(
+                "MATCH (ep:Episodic {name: $name, group_id: $g}) "
+                "SET ep.content_hash = $h",
+                name=episode_id,
+                g=episode.owner_id,
+                h=content_hash,
+            )
         # After extraction, promote any Person entity that was co-mentioned
         # with the user in this episode as a potential name claim. If the user
         # entity is still named by email (contains @) and the episode contains
@@ -296,21 +326,28 @@ class GraphitiMemoryStore:
             return record["name"] if record else None
 
     async def search(
-        self, *, owner_id: str, query: str, k: int = 10
+        self, *, owner_id: str, query: str, k: int = 10, source_filter: str | None = None
     ) -> list[MemorySearchHit]:
         if not query.strip():
             # Blank query: list recent episodic nodes directly from Neo4j
             # without going through the LLM search path.
-            return await self._list_recent_episodes(owner_id=owner_id, k=k)
+            return await self._list_recent_episodes(
+                owner_id=owner_id, k=k, source_filter=source_filter
+            )
 
+        # Over-fetch when filtering so we still return k results after pruning.
+        fetch_k = k * 2 if source_filter else k
         results = await self._graphiti.search(
             query=query,
             group_ids=[owner_id],
-            num_results=k,
+            num_results=fetch_k,
         )
         hits: list[MemorySearchHit] = []
         episode_ids = []
         for r in results:
+            source_desc = getattr(r, "source_description", "")
+            if source_filter and source_desc != source_filter:
+                continue
             entities = [
                 getattr(n, "name", str(n))
                 for n in getattr(r, "relevant_schema", {}).get("nodes", [])
@@ -327,10 +364,12 @@ class GraphitiMemoryStore:
                     episode_id=episode_id,
                     excerpt=getattr(r, "fact", getattr(r, "episode_body", "")),
                     score=float(getattr(r, "score", 0.0)),
-                    source=getattr(r, "source_description", ""),
+                    source=source_desc,
                     entities=entities,
                 )
             )
+            if len(hits) >= k:
+                break
         # Enrich with thread names via DISCUSSED_IN
         if hits:
             thread_names = await self._fetch_thread_names(
@@ -371,15 +410,18 @@ class GraphitiMemoryStore:
         }
 
     async def _list_recent_episodes(
-        self, *, owner_id: str, k: int
+        self, *, owner_id: str, k: int, source_filter: str | None = None
     ) -> list[MemorySearchHit]:
         """Direct Neo4j query for recent episodes — bypasses LLM search."""
         driver = self._graphiti.driver
         async with driver.session() as session:
+            # Conditional source filter — only added when caller requests it.
+            src_clause = "AND e.source_description = $src" if source_filter else ""
             result = await session.run(
-                """
-                MATCH (e:Episodic {group_id: $group_id})
-                OPTIONAL MATCH (e)-[:MENTIONS]->(entity:Entity {group_id: $group_id})
+                f"""
+                MATCH (e:Episodic {{group_id: $group_id}})
+                WHERE true {src_clause}
+                OPTIONAL MATCH (e)-[:MENTIONS]->(entity:Entity {{group_id: $group_id}})
                   -[:DISCUSSED_IN]->(conv:Entity)
                 WITH e, collect(DISTINCT conv.name)[0] AS thread_name
                 RETURN e.name AS episode_id,
@@ -391,6 +433,7 @@ class GraphitiMemoryStore:
                 """,
                 group_id=owner_id,
                 k=k,
+                src=source_filter or "",
             )
             records = await result.data()
         return [
@@ -498,6 +541,103 @@ class GraphitiMemoryStore:
             )
 
         return KnowledgeGraph(nodes=nodes, edges=edges)
+
+    async def get_summary(self, *, owner_id: str) -> dict:
+        """Return a compact summary of what the graph knows about this user.
+
+        Used by the agent runner to inject a one-time context message at the
+        start of each new thread so the agent is not cold.
+        """
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            # Most-connected non-provisioned, non-deleted entities (the
+            # interesting ones Graphiti extracted, not platform scaffolding).
+            entity_result = await session.run(
+                """
+                MATCH (n:Entity {group_id: $g})
+                WHERE (n.provisioned IS NULL OR n.provisioned = false)
+                  AND n.deleted_at IS NULL
+                WITH n, size([(n)-[]-() | 1]) AS degree
+                WHERE degree > 0
+                ORDER BY degree DESC
+                LIMIT 8
+                RETURN n.name AS name, labels(n) AS labels, n.summary AS summary
+                """,
+                g=owner_id,
+            )
+            entity_records = await entity_result.data()
+
+            # Recent conversation thread names.
+            thread_result = await session.run(
+                """
+                MATCH (c:Entity:Conversation {group_id: $g})
+                ORDER BY c.created_at DESC
+                LIMIT 4
+                RETURN c.name AS name
+                """,
+                g=owner_id,
+            )
+            thread_records = await thread_result.data()
+
+            # Most recent semantic memories (facts/preferences).
+            fact_result = await session.run(
+                """
+                MATCH (e:Episodic {group_id: $g, source_description: "fact"})
+                ORDER BY e.created_at DESC
+                LIMIT 6
+                RETURN e.content AS content
+                """,
+                g=owner_id,
+            )
+            fact_records = await fact_result.data()
+
+        entities = [
+            {"name": r["name"], "labels": [lbl for lbl in (r["labels"] or []) if lbl != "Entity"]}
+            for r in entity_records
+        ]
+        threads = [r["name"] for r in thread_records if r.get("name")]
+        facts = [(r.get("content") or "")[:300] for r in fact_records if r.get("content")]
+
+        return {"entities": entities, "threads": threads, "facts": facts}
+
+    async def get_entity_triples(
+        self, *, owner_id: str, entity_name: str, k: int = 10
+    ) -> list[dict]:
+        """Return RELATES_TO triples for entities whose name contains entity_name.
+
+        Each triple is {subject, predicate, object, fact} and represents a
+        relationship extracted by Graphiti from the user's episodes.
+        """
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (n:Entity {group_id: $g})
+                WHERE toLower(n.name) CONTAINS toLower($q)
+                   OR toLower($q) CONTAINS toLower(n.name)
+                WITH n LIMIT 3
+                MATCH (a:Entity {group_id: $g})-[r:RELATES_TO]->(b:Entity {group_id: $g})
+                WHERE (a = n OR b = n) AND r.fact IS NOT NULL AND r.fact <> ""
+                RETURN a.name AS subject,
+                       coalesce(r.name, type(r)) AS predicate,
+                       b.name AS object,
+                       r.fact AS fact
+                LIMIT $k
+                """,
+                g=owner_id,
+                q=entity_name,
+                k=k,
+            )
+            records = await result.data()
+        return [
+            {
+                "subject": r["subject"],
+                "predicate": (r["predicate"] or "").replace("_", " ").lower(),
+                "object": r["object"],
+                "fact": r["fact"],
+            }
+            for r in records
+        ]
 
     async def provision_user(
         self, *, owner_id: str, email: str, registered_at: str

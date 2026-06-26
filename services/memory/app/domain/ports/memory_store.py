@@ -69,9 +69,18 @@ class IMemoryStore(Protocol):
         pass
 
     async def search(
-        self, *, owner_id: str, query: str, k: int = 10
+        self,
+        *,
+        owner_id: str,
+        query: str,
+        k: int = 10,
+        source_filter: str | None = None,
     ) -> list[MemorySearchHit]:
-        """Hybrid search. Empty query returns recent episodes."""
+        """Hybrid search. Empty query returns recent episodes.
+
+        source_filter: if set, only return episodes whose source_description
+        matches (e.g. "fact" or "conversation"). None means no filter.
+        """
         pass
 
     async def list_entities(
@@ -137,6 +146,16 @@ class IMemoryStore(Protocol):
 
     async def delete_episodes(self, *, owner_id: str, episode_ids: list[str]) -> int:
         """Delete specific episodes by id. Returns count deleted."""
+        pass
+
+    async def get_summary(self, *, owner_id: str) -> dict:
+        """Return compact summary dict: entities, threads, facts."""
+        pass
+
+    async def get_entity_triples(
+        self, *, owner_id: str, entity_name: str, k: int = 10
+    ) -> list[dict]:
+        """Return RELATES_TO triples for entities matching entity_name."""
         pass
 
     async def delete_by_owner(self, *, owner_id: str) -> None:

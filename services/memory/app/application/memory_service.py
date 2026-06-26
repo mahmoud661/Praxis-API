@@ -25,7 +25,13 @@ class MemoryService:
     _MAX_EPISODE_CHARS = 4000  # ~1000 tokens — keeps Graphiti extraction reliable
 
     async def add_episode(
-        self, *, owner_id: str, content: str, source: str = "conversation", thread_id: str | None = None
+        self,
+        *,
+        owner_id: str,
+        content: str,
+        source: str = "conversation",
+        thread_id: str | None = None,
+        episode_id: str | None = None,
     ) -> str:
         content = content.strip()
         if not content:
@@ -33,23 +39,39 @@ class MemoryService:
         if len(content) > self._MAX_EPISODE_CHARS:
             content = content[: self._MAX_EPISODE_CHARS]
         episode = Episode(
-            id=str(uuid.uuid4()),
+            id=episode_id or str(uuid.uuid4()),
             owner_id=owner_id,
             content=content,
             source=source,
             thread_id=thread_id or "",
         )
-        episode_id = await self._store.add_episode(episode)
+        try:
+            episode_id = await self._store.add_episode(episode)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "memory.episode_extraction_failed",
+                owner_id=owner_id,
+                source=source,
+                error=str(exc),
+            )
+            raise
         self._logger.info("memory.episode_added", owner_id=owner_id, source=source)
         return episode_id
 
     async def search(
-        self, *, owner_id: str, query: str, k: int = 10
+        self,
+        *,
+        owner_id: str,
+        query: str,
+        k: int = 10,
+        source_filter: str | None = None,
     ) -> list[MemorySearchHit]:
         query = query.strip()
         if not query:
             return []
-        hits = await self._store.search(owner_id=owner_id, query=query, k=k)
+        hits = await self._store.search(
+            owner_id=owner_id, query=query, k=k, source_filter=source_filter
+        )
         self._logger.debug("memory.search", owner_id=owner_id, hits=len(hits))
         return hits
 
@@ -166,6 +188,54 @@ class MemoryService:
             "memory.entity_soft_deleted",
             owner_id=owner_id,
             entity_id=entity_id,
+        )
+
+    async def get_context_summary(self, *, owner_id: str) -> str:
+        """Return a concise, agent-readable context string about this user.
+
+        Pulls top extracted entities, recent threads, and stored facts from
+        Neo4j and formats them into a brief paragraph the agent injects as a
+        SystemMessage at the start of each new thread.
+        """
+        data = await self._store.get_summary(owner_id=owner_id)
+        entities: list[dict] = data.get("entities", [])
+        threads: list[str] = data.get("threads", [])
+        facts: list[str] = data.get("facts", [])
+
+        if not entities and not facts:
+            return ""
+
+        lines: list[str] = ["[User context from long-term memory]"]
+
+        if entities:
+            entity_names = ", ".join(e["name"] for e in entities[:6])
+            lines.append(f"Known entities: {entity_names}")
+
+        if facts:
+            lines.append("Known facts/preferences:")
+            for f in facts[:5]:
+                # Strip "Speaker: " prefix that Graphiti stores verbatim.
+                # Pattern: one or more non-colon chars, colon, space.
+                body = f.strip()
+                if ": " in body:
+                    body = body.split(": ", 1)[1]
+                lines.append(f"  • {body}")
+
+        if threads:
+            lines.append(f"Recent conversations: {', '.join(threads[:3])}")
+
+        lines.append(
+            "Use this context to personalise your responses. "
+            "Call memory_search for deeper recall on any topic."
+        )
+        return "\n".join(lines)
+
+    async def get_entity_triples(
+        self, *, owner_id: str, entity_name: str, k: int = 10
+    ) -> list[dict]:
+        """Return relationship triples for entities matching entity_name."""
+        return await self._store.get_entity_triples(
+            owner_id=owner_id, entity_name=entity_name, k=k
         )
 
     async def forget(self, *, owner_id: str, query: str) -> int:

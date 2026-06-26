@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from ....application.services._errors import FileNotFoundError
 from ....domain.IServices.i_files_service import IFilesService
@@ -116,11 +116,26 @@ class AgentRunner:
         human_extra: dict[str, Any] = {}
         if attachments_meta:
             human_extra["attachments"] = attachments_meta
-        inputs = {
-            "messages": [
-                HumanMessage(content=user_message, additional_kwargs=human_extra)
-            ]
-        }
+        messages = [HumanMessage(content=user_message, additional_kwargs=human_extra)]
+
+        # On the very first turn of a new thread, inject a SystemMessage with
+        # what the graph already knows about this user so the agent is never
+        # cold. Subsequent turns inherit the context from the LangGraph checkpoint.
+        try:
+            state = await graph.aget_state(config)
+            is_new_thread = not (state.values or {}).get("messages")
+        except Exception:  # noqa: BLE001
+            is_new_thread = False
+
+        if is_new_thread:
+            try:
+                context = await self._memory.get_context(owner_id=owner_id)
+                if context:
+                    messages.insert(0, SystemMessage(content=context))
+            except Exception:  # noqa: BLE001
+                pass  # never block the run on a failed memory fetch
+
+        inputs = {"messages": messages}
 
         self._logger.info("agent.run.start", thread_id=thread_id)
         try:

@@ -5,6 +5,7 @@ instead — only tools wired to THIS app's services live here."""
 from .kb_search import make_kb_search_tool
 from .memory_tools import (
     make_memory_forget_tool,
+    make_memory_graph_search_tool,
     make_memory_search_tool,
     make_memory_store_tool,
 )
@@ -12,6 +13,7 @@ from .memory_tools import (
 __all__ = [
     "make_kb_search_tool",
     "make_memory_forget_tool",
+    "make_memory_graph_search_tool",
     "make_memory_search_tool",
     "make_memory_store_tool",
 ]

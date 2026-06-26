@@ -13,19 +13,38 @@ class MemoryHit:
     entities: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class GraphTriple:
+    subject: str
+    predicate: str
+    object: str
+    fact: str
+
+
 class IMemoryClient(Protocol):
     async def search(
-        self, *, owner_id: str, query: str, k: int = 10
+        self, *, owner_id: str, query: str, k: int = 10, memory_type: str = "all"
     ) -> list[MemoryHit]:
-        """Hybrid graph+vector search over the user's long-term memory."""
+        """Hybrid graph+vector search over the user's long-term memory.
+
+        memory_type: "all" | "semantic" (facts/preferences) | "episodic" (events)
+        """
 
     async def store(
         self, *, owner_id: str, content: str, memory_type: str, thread_id: str | None = None
     ) -> str:
-        """Persist a memory episode. Returns the assigned episode_id."""
+        """Queue a memory episode for background extraction. Returns episode_id."""
 
     async def forget(self, *, owner_id: str, query: str) -> int:
         """Search for memories matching query and delete them. Returns count deleted."""
+
+    async def get_context(self, *, owner_id: str) -> str:
+        """Return a concise context string about the user for agent injection."""
+
+    async def graph_search(
+        self, *, owner_id: str, entity: str, k: int = 10
+    ) -> list[GraphTriple]:
+        """Return relationship triples for entities matching the given name."""
 
     async def provision_node(
         self, *, type: str, id: str, name: str, owner_id: str, summary: str = "", thread_id: str | None = None

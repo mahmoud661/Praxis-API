@@ -1,10 +1,11 @@
 """
 Long-term memory tools for the general agent.
 
-Three tools, one responsibility each:
-  - memory_search  : retrieve relevant episodes/facts from Graphiti
-  - memory_store   : persist something worth remembering across sessions
-  - memory_forget  : delete specific memories the user wants removed
+Four tools, one responsibility each:
+  - memory_search       : retrieve relevant episodes/facts from Graphiti
+  - memory_store        : persist something worth remembering across sessions
+  - memory_forget       : delete specific memories the user wants removed
+  - memory_graph_search : query structured relationship triples from the graph
 
 `owner_id` comes from the LangChain `RunnableConfig` — same pattern as
 `kb_search` — so memory is always scoped to the right user without the
@@ -32,7 +33,15 @@ def make_memory_search_tool(*, memory_client: "IMemoryClient") -> BaseTool:
     @tool
     async def memory_search(
         query: Annotated[str, "Natural-language question to search long-term memory."],
-        config: RunnableConfig,
+        memory_type: Annotated[
+            Literal["all", "semantic", "episodic"],
+            (
+                "'all' searches everything (default). "
+                "'semantic' restricts to stored facts and preferences. "
+                "'episodic' restricts to past events and interactions."
+            ),
+        ] = "all",
+        config: RunnableConfig = None,
     ) -> str:
         """Search the user's long-term memory and Graphiti knowledge graph.
 
@@ -40,8 +49,10 @@ def make_memory_search_tool(*, memory_client: "IMemoryClient") -> BaseTool:
         when…"), asks about something from a previous session, or when background
         context would meaningfully improve your answer.
 
-        Returns ranked excerpts from the user's episodic and semantic memory,
-        together with the entities Graphiti extracted from each episode.
+        Tip: use memory_type='semantic' when looking up preferences or facts,
+        and memory_type='episodic' when looking up past events or decisions.
+
+        Returns ranked excerpts together with the entities Graphiti extracted.
         """
         owner_id = _owner_id(config)
         if owner_id is None:
@@ -51,7 +62,8 @@ def make_memory_search_tool(*, memory_client: "IMemoryClient") -> BaseTool:
             return "[tool error] empty query."
         try:
             hits = await memory_client.search(
-                owner_id=owner_id, query=cleaned, k=_DEFAULT_K
+                owner_id=owner_id, query=cleaned, k=_DEFAULT_K,
+                memory_type=memory_type,
             )
         except Exception as exc:  # noqa: BLE001
             return f"[tool error] memory search failed: {exc}"
@@ -113,9 +125,51 @@ def make_memory_store_tool(*, memory_client: "IMemoryClient") -> BaseTool:
         except Exception as exc:  # noqa: BLE001
             detail = str(exc) or type(exc).__name__
             return f"[tool error] memory store failed: {detail}"
-        return f"Stored. episode_id={episode_id}"
+        return f"Queued for memory extraction. episode_id={episode_id}"
 
     return memory_store
+
+
+def make_memory_graph_search_tool(*, memory_client: "IMemoryClient") -> BaseTool:
+    """Return the `memory_graph_search` tool with `memory_client` in its closure."""
+
+    @tool
+    async def memory_graph_search(
+        entity: Annotated[
+            str,
+            "Entity name or topic to look up (e.g. 'my job', 'Sarah', 'Optimum Partners').",
+        ],
+        config: RunnableConfig,
+    ) -> str:
+        """Look up structured relationship facts from the user's knowledge graph.
+
+        Returns entity relationship triples extracted by Graphiti from past
+        conversations — e.g. "Mahmoud works at Optimum Partners" or
+        "Praxis uses Neo4j". Use this instead of memory_search when you need
+        structured facts about connections between people, places, or concepts,
+        rather than episode excerpts.
+        """
+        owner_id = _owner_id(config)
+        if owner_id is None:
+            return "[tool error] missing owner_id — cannot scope graph search."
+        cleaned = entity.strip()
+        if not cleaned:
+            return "[tool error] empty entity name."
+        try:
+            triples = await memory_client.graph_search(
+                owner_id=owner_id, entity=cleaned, k=10
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"[tool error] memory graph search failed: {exc}"
+        if not triples:
+            return f"[tool note] no graph relationships found for '{cleaned}'."
+        lines = [
+            f"• {t.subject} → {t.predicate} → {t.object}: {t.fact}"
+            for t in triples
+        ]
+        return "\n".join(lines)
+
+    return memory_graph_search
 
 
 def make_memory_forget_tool(*, memory_client: "IMemoryClient") -> BaseTool:

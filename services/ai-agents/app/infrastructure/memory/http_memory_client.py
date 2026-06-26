@@ -31,11 +31,14 @@ class HttpMemoryClient:
         )
 
     async def search(
-        self, *, owner_id: str, query: str, k: int = 10
+        self, *, owner_id: str, query: str, k: int = 10, memory_type: str = "all"
     ) -> list[MemoryHit]:
+        params: dict = {"q": query, "k": k}
+        if memory_type != "all":
+            params["source"] = "fact" if memory_type == "semantic" else "conversation"
         r = await self._http.get(
             "/knowledge/search",
-            params={"q": query, "k": k},
+            params=params,
             headers={"x-user-id": owner_id},
         )
         r.raise_for_status()
@@ -55,12 +58,12 @@ class HttpMemoryClient:
         body: dict = {"content": content, "memory_type": memory_type}
         if thread_id:
             body["thread_id"] = thread_id
+        # Endpoint returns immediately (202-style) — extraction runs in the
+        # memory service background, so the default 5s timeout is enough.
         r = await self._http.post(
             "/knowledge/episodes",
             json=body,
             headers={"x-user-id": owner_id},
-            # Graphiti extraction involves an LLM call — give it time.
-            timeout=httpx.Timeout(connect=5.0, read=90.0, write=5.0, pool=5.0),
         )
         r.raise_for_status()
         return r.json().get("episode_id", "")
@@ -95,6 +98,34 @@ class HttpMemoryClient:
             json={"from_id": from_id, "to_id": to_id, "owner_id": owner_id, "relationship": relationship},
         )
         r.raise_for_status()
+
+    async def get_context(self, *, owner_id: str) -> str:
+        r = await self._http.get(
+            "/knowledge/summary",
+            headers={"x-user-id": owner_id},
+        )
+        r.raise_for_status()
+        return r.json().get("context", "")
+
+    async def graph_search(
+        self, *, owner_id: str, entity: str, k: int = 10
+    ) -> list:
+        from ...domain.ports.i_memory_client import GraphTriple
+        r = await self._http.get(
+            "/knowledge/graph/context",
+            params={"entity": entity, "k": k},
+            headers={"x-user-id": owner_id},
+        )
+        r.raise_for_status()
+        return [
+            GraphTriple(
+                subject=t["subject"],
+                predicate=t["predicate"],
+                object=t["object"],
+                fact=t["fact"],
+            )
+            for t in r.json().get("triples", [])
+        ]
 
     async def aclose(self) -> None:
         await self._http.aclose()
