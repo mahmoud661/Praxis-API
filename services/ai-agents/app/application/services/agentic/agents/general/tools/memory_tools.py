@@ -72,8 +72,9 @@ def make_memory_search_tool(*, memory_client: "IMemoryClient") -> BaseTool:
         parts: list[str] = []
         for i, h in enumerate(hits, 1):
             entities = ", ".join(h.entities) if h.entities else "—"
+            thread = f" [from: {h.thread_name}]" if h.thread_name else ""
             parts.append(
-                f"[{i}] score={h.score:.2f} source={h.source}\n"
+                f"[{i}] score={h.score:.2f} source={h.source}{thread}\n"
                 f"{h.excerpt}\n"
                 f"Entities: {entities}"
             )

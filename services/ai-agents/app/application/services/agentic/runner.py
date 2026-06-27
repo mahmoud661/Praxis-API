@@ -22,6 +22,7 @@ Design choices:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Awaitable, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -129,11 +130,16 @@ class AgentRunner:
 
         if is_new_thread:
             try:
-                context = await self._memory.get_context(owner_id=owner_id)
+                # 3-second cap: a slow Neo4j or memory service must not delay
+                # the user's first message by the full 15-second HTTP timeout.
+                context = await asyncio.wait_for(
+                    self._memory.get_context(owner_id=owner_id),
+                    timeout=3.0,
+                )
                 if context:
                     messages.insert(0, SystemMessage(content=context))
             except Exception:  # noqa: BLE001
-                pass  # never block the run on a failed memory fetch
+                pass  # never block the run on a failed or slow memory fetch
 
         inputs = {"messages": messages}
 

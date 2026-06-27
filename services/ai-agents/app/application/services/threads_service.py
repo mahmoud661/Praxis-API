@@ -92,8 +92,8 @@ class ThreadsService:
         # Fire-and-forget: a failure here must not break thread creation.
         try:
             await self._memory.provision_node(
-                type="conversation",
-                id=thread.id,
+                node_type="conversation",
+                node_id=thread.id,
                 name=thread.title,
                 owner_id=owner_id,
                 summary="AI conversation thread",

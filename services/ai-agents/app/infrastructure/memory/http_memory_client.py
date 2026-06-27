@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import httpx
 
-from ...domain.ports.i_memory_client import IMemoryClient, MemoryHit  # noqa: F401
+from ...domain.ports.i_memory_client import GraphTriple, IMemoryClient, MemoryHit  # noqa: F401
 from ...infrastructure.config.env import Env
 
 
@@ -24,9 +24,8 @@ class HttpMemoryClient:
     def __init__(self, env: Env) -> None:
         self._http = httpx.AsyncClient(
             base_url=env.memory_service_url.rstrip("/"),
-            # Default timeout for fast ops (search, provision).
-            # store() overrides to 90 s — Graphiti runs LLM extraction which
-            # can take 30-60 s on complex content.
+            # store() returns immediately (fire-and-forget 201) so the 15 s
+            # read timeout covers all endpoints including episode ingestion.
             timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0),
         )
 
@@ -48,6 +47,7 @@ class HttpMemoryClient:
                 score=float(h.get("score", 0.0)),
                 source=h.get("source", ""),
                 entities=h.get("entities") or [],
+                thread_name=h.get("thread_name") or "",
             )
             for h in r.json().get("hits", [])
         ]
@@ -78,16 +78,23 @@ class HttpMemoryClient:
         return r.json().get("deleted", 0)
 
     async def provision_node(
-        self, *, type: str, id: str, name: str, owner_id: str, summary: str = "", thread_id: str | None = None
+        self,
+        *,
+        node_type: str,
+        node_id: str,
+        name: str,
+        owner_id: str,
+        summary: str = "",
+        thread_id: str | None = None,
     ) -> None:
         r = await self._http.post(
             "/provision",
-            json={"type": type, "id": id, "name": name, "owner_id": owner_id, "summary": summary},
+            json={"type": node_type, "id": node_id, "name": name, "owner_id": owner_id, "summary": summary},
         )
         r.raise_for_status()
         if thread_id:
             await self.provision_link(
-                from_id=thread_id, to_id=id, owner_id=owner_id, relationship="HAS_ATTACHMENT"
+                from_id=thread_id, to_id=node_id, owner_id=owner_id, relationship="HAS_ATTACHMENT"
             )
 
     async def provision_link(
@@ -109,8 +116,7 @@ class HttpMemoryClient:
 
     async def graph_search(
         self, *, owner_id: str, entity: str, k: int = 10
-    ) -> list:
-        from ...domain.ports.i_memory_client import GraphTriple
+    ) -> list[GraphTriple]:
         r = await self._http.get(
             "/knowledge/graph/context",
             params={"entity": entity, "k": k},

@@ -214,12 +214,7 @@ class MemoryService:
         if facts:
             lines.append("Known facts/preferences:")
             for f in facts[:5]:
-                # Strip "Speaker: " prefix that Graphiti stores verbatim.
-                # Pattern: one or more non-colon chars, colon, space.
-                body = f.strip()
-                if ": " in body:
-                    body = body.split(": ", 1)[1]
-                lines.append(f"  • {body}")
+                lines.append(f"  • {f.strip()}")
 
         if threads:
             lines.append(f"Recent conversations: {', '.join(threads[:3])}")

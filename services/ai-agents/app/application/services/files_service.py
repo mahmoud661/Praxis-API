@@ -203,8 +203,8 @@ class FilesService:
         size_kb = size_bytes // 1024 or 1
         try:
             await self._memory.provision_node(
-                type=entity_type,
-                id=file_id,
+                node_type=entity_type,
+                node_id=file_id,
                 name=filename,
                 owner_id=owner_id,
                 summary=f"{mime_type} · {size_kb} KB",

@@ -13,7 +13,21 @@ import hashlib
 import uuid
 from datetime import datetime, timezone
 
+from graphiti_core import Graphiti
+from graphiti_core.cross_encoder import OpenAIRerankerClient
+from graphiti_core.embedder import OpenAIEmbedder, OpenAIEmbedderConfig
+from graphiti_core.llm_client.openai_client import LLMConfig, OpenAIClient
+from graphiti_core.nodes import EpisodeType
 from pydantic import BaseModel
+
+from ...domain.ports.memory_store import (
+    Episode,
+    GraphEdge,
+    GraphNode,
+    KnowledgeGraph,
+    MemoryEntity,
+    MemorySearchHit,
+)
 
 
 class Person(BaseModel):
@@ -33,7 +47,7 @@ class Concept(BaseModel):
 
 
 class Event(BaseModel):
-    """A specific occurrence that happened or is planned — a meeting, project, deadline, or milestone."""
+    """A specific occurrence — a meeting, project, deadline, or milestone."""
 
 
 class Preference(BaseModel):
@@ -65,21 +79,19 @@ def _parse_dt(value: str) -> datetime:
     except ValueError:
         return datetime.now(tz=timezone.utc)
 
-from graphiti_core import Graphiti
-from graphiti_core.llm_client.openai_client import LLMConfig, OpenAIClient
-from graphiti_core.embedder import OpenAIEmbedder, OpenAIEmbedderConfig
-from graphiti_core.cross_encoder import OpenAIRerankerClient
-from graphiti_core.nodes import EpisodeType
 
-from ...domain.ports.memory_store import (
-    Episode,
-    GraphEdge,
-    GraphNode,
-    IMemoryStore,
-    KnowledgeGraph,
-    MemoryEntity,
-    MemorySearchHit,
-)
+def _strip_speaker_prefix(text: str) -> str:
+    """Strip the 'SpeakerName: ' prefix we prepend before Graphiti ingestion.
+
+    We prefix episode bodies with the user's entity name so Graphiti's
+    extraction links entities back to the correct speaker node. That prefix
+    must be removed before the text is shown to the user or injected into
+    the agent's context, or it reads as redundant noise.
+    """
+    if ": " in text:
+        return text.split(": ", 1)[1]
+    return text
+
 
 
 class GraphitiMemoryStore:
@@ -162,15 +174,19 @@ class GraphitiMemoryStore:
             group_id=episode.owner_id,
             entity_types=_ENTITY_TYPES,
         )
-        # Stamp the content hash so duplicate calls with the same content
-        # are caught before extraction next time.
+        # Stamp the content hash (for dedup on future calls) and raw_content
+        # (the original agent input, before the speaker prefix is applied for
+        # Graphiti ingestion). raw_content is what agents and the frontend see
+        # as the memory excerpt — it preserves exact wording without fragile
+        # prefix-stripping at read time.
         async with driver.session() as session:
             await session.run(
                 "MATCH (ep:Episodic {name: $name, group_id: $g}) "
-                "SET ep.content_hash = $h",
+                "SET ep.content_hash = $h, ep.raw_content = $raw",
                 name=episode_id,
                 g=episode.owner_id,
                 h=content_hash,
+                raw=episode.content,
             )
         # After extraction, promote any Person entity that was co-mentioned
         # with the user in this episode as a potential name claim. If the user
@@ -265,7 +281,10 @@ class GraphitiMemoryStore:
                 WITH root, dup
                 MATCH (dup)-[r:RELATES_TO]->(other:Entity)
                 WHERE other <> root
-                MERGE (root)-[:RELATES_TO {name: r.name, fact: r.fact, uuid: r.uuid, group_id: r.group_id, created_at: r.created_at}]->(other)
+                MERGE (root)-[:RELATES_TO {
+                  name: r.name, fact: r.fact, uuid: r.uuid,
+                  group_id: r.group_id, created_at: r.created_at
+                }]->(other)
                 DELETE r
                 """,
                 owner_id=owner_id,
@@ -279,7 +298,10 @@ class GraphitiMemoryStore:
                 WITH root, dup
                 MATCH (other:Entity)-[r:RELATES_TO]->(dup)
                 WHERE other <> root
-                MERGE (other)-[:RELATES_TO {name: r.name, fact: r.fact, uuid: r.uuid, group_id: r.group_id, created_at: r.created_at}]->(root)
+                MERGE (other)-[:RELATES_TO {
+                  name: r.name, fact: r.fact, uuid: r.uuid,
+                  group_id: r.group_id, created_at: r.created_at
+                }]->(root)
                 DELETE r
                 """,
                 owner_id=owner_id,
@@ -359,10 +381,13 @@ class GraphitiMemoryStore:
             # causing forget() to silently delete nothing.
             episode_id = getattr(r, "name", "") or getattr(r, "uuid", "")
             episode_ids.append(episode_id)
+            # Placeholder excerpt — overwritten by _enrich_hits() below with
+            # the stamped raw_content so the exact agent input is preserved.
+            raw_fallback = getattr(r, "fact", getattr(r, "episode_body", ""))
             hits.append(
                 MemorySearchHit(
                     episode_id=episode_id,
-                    excerpt=getattr(r, "fact", getattr(r, "episode_body", "")),
+                    excerpt=raw_fallback,
                     score=float(getattr(r, "score", 0.0)),
                     source=source_desc,
                     entities=entities,
@@ -370,22 +395,25 @@ class GraphitiMemoryStore:
             )
             if len(hits) >= k:
                 break
-        # Enrich with thread names via DISCUSSED_IN
+        # Single-query enrichment: swap in raw_content (original agent input)
+        # and attach thread_name — one round-trip instead of two.
         if hits:
-            thread_names = await self._fetch_thread_names(
-                owner_id=owner_id, episode_ids=episode_ids
-            )
+            enriched = await self._enrich_hits(owner_id=owner_id, episode_ids=episode_ids)
             for hit in hits:
-                hit.thread_name = thread_names.get(hit.episode_id, "")
+                meta = enriched.get(hit.episode_id, {})
+                # raw_content wins; fall back to stripping the prefix from
+                # the Graphiti-stored body for nodes written before this field.
+                hit.excerpt = meta.get("raw_content") or _strip_speaker_prefix(hit.excerpt)
+                hit.thread_name = meta.get("thread_name") or ""
         return hits
 
-    async def _fetch_thread_names(
+    async def _enrich_hits(
         self, *, owner_id: str, episode_ids: list[str]
-    ) -> dict[str, str]:
-        """Return {episode_id: conversation_name} for each episode.
+    ) -> dict[str, dict]:
+        """Single-pass enrichment: raw_content + thread_name for each episode.
 
-        Uses path traversal (ep)-[:MENTIONS]->(entity)-[:DISCUSSED_IN]->(conv)
-        instead of a cross-product filter so Neo4j uses index-backed hops.
+        Combines what was two separate Neo4j queries (_fetch_thread_names +
+        a raw_content lookup) into one. Returns {episode_id: {raw_content, thread_name}}.
         """
         if not episode_ids:
             return {}
@@ -398,6 +426,7 @@ class GraphitiMemoryStore:
                 OPTIONAL MATCH (ep)-[:MENTIONS]->(entity:Entity)
                               -[:DISCUSSED_IN]->(conv:Entity)
                 RETURN eid AS episode_id,
+                       ep.raw_content AS raw_content,
                        collect(DISTINCT conv.name)[0] AS thread_name
                 """,
                 ids=episode_ids,
@@ -405,7 +434,10 @@ class GraphitiMemoryStore:
             )
             records = await result.data()
         return {
-            rec["episode_id"]: rec.get("thread_name") or ""
+            rec["episode_id"]: {
+                "raw_content": rec.get("raw_content") or "",
+                "thread_name": rec.get("thread_name") or "",
+            }
             for rec in records
         }
 
@@ -425,6 +457,7 @@ class GraphitiMemoryStore:
                   -[:DISCUSSED_IN]->(conv:Entity)
                 WITH e, collect(DISTINCT conv.name)[0] AS thread_name
                 RETURN e.name AS episode_id,
+                       e.raw_content AS raw_content,
                        e.content AS content,
                        e.source_description AS source,
                        thread_name
@@ -436,16 +469,23 @@ class GraphitiMemoryStore:
                 src=source_filter or "",
             )
             records = await result.data()
-        return [
-            MemorySearchHit(
-                episode_id=rec.get("episode_id", ""),
-                excerpt=(rec.get("content") or "")[:400],
-                score=1.0,
-                source=rec.get("source") or "",
-                thread_name=rec.get("thread_name") or "",
+        results = []
+        for rec in records:
+            # Prefer stamped raw_content (original agent input); fall back to
+            # prefix-stripping for nodes written before raw_content was added.
+            raw = rec.get("raw_content") or _strip_speaker_prefix(
+                (rec.get("content") or "")[:400]
             )
-            for rec in records
-        ]
+            results.append(
+                MemorySearchHit(
+                    episode_id=rec.get("episode_id", ""),
+                    excerpt=raw[:400],
+                    score=1.0,
+                    source=rec.get("source") or "",
+                    thread_name=rec.get("thread_name") or "",
+                )
+            )
+        return results
 
     async def list_entities(
         self, *, owner_id: str, limit: int = 50
@@ -466,7 +506,7 @@ class GraphitiMemoryStore:
             records = await result.data()
         entities: list[MemoryEntity] = []
         for rec in records:
-            type_labels = [l for l in (rec.get("labels") or []) if l != "Entity"]
+            type_labels = [lbl for lbl in (rec.get("labels") or []) if lbl != "Entity"]
             entities.append(
                 MemoryEntity(
                     name=rec.get("name", ""),
@@ -517,7 +557,7 @@ class GraphitiMemoryStore:
 
         nodes: list[GraphNode] = []
         for rec in node_records:
-            type_labels = [l for l in (rec.get("labels") or []) if l != "Entity"]
+            type_labels = [lbl for lbl in (rec.get("labels") or []) if lbl != "Entity"]
             raw_deleted = rec.get("deleted_at")
             nodes.append(
                 GraphNode(
@@ -580,12 +620,14 @@ class GraphitiMemoryStore:
             thread_records = await thread_result.data()
 
             # Most recent semantic memories (facts/preferences).
+            # Prefer raw_content (original agent input, no speaker prefix);
+            # fall back to e.content for nodes written before raw_content existed.
             fact_result = await session.run(
                 """
                 MATCH (e:Episodic {group_id: $g, source_description: "fact"})
                 ORDER BY e.created_at DESC
                 LIMIT 6
-                RETURN e.content AS content
+                RETURN coalesce(e.raw_content, e.content) AS content
                 """,
                 g=owner_id,
             )

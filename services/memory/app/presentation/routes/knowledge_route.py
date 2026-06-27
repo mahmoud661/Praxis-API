@@ -139,6 +139,7 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
                     score=h.score,
                     source=h.source,
                     entities=h.entities,
+                    thread_name=h.thread_name,
                 )
                 for h in hits
             ]

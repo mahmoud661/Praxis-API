@@ -7,14 +7,19 @@ from typing import Protocol
 
 @dataclass(frozen=True, slots=True)
 class MemoryHit:
+    """A single search result from the memory service."""
+
     excerpt: str
     score: float
     source: str
     entities: list[str] = field(default_factory=list)
+    thread_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class GraphTriple:
+    """A subject → predicate → object relationship triple from the graph."""
+
     subject: str
     predicate: str
     object: str
@@ -22,6 +27,8 @@ class GraphTriple:
 
 
 class IMemoryClient(Protocol):
+    """Port for the memory service HTTP adapter."""
+
     async def search(
         self, *, owner_id: str, query: str, k: int = 10, memory_type: str = "all"
     ) -> list[MemoryHit]:
@@ -31,7 +38,12 @@ class IMemoryClient(Protocol):
         """
 
     async def store(
-        self, *, owner_id: str, content: str, memory_type: str, thread_id: str | None = None
+        self,
+        *,
+        owner_id: str,
+        content: str,
+        memory_type: str,
+        thread_id: str | None = None,
     ) -> str:
         """Queue a memory episode for background extraction. Returns episode_id."""
 
@@ -47,7 +59,14 @@ class IMemoryClient(Protocol):
         """Return relationship triples for entities matching the given name."""
 
     async def provision_node(
-        self, *, type: str, id: str, name: str, owner_id: str, summary: str = "", thread_id: str | None = None
+        self,
+        *,
+        node_type: str,
+        node_id: str,
+        name: str,
+        owner_id: str,
+        summary: str = "",
+        thread_id: str | None = None,
     ) -> None:
         """Upsert an entity node and optionally link it to a thread."""
 
@@ -55,4 +74,3 @@ class IMemoryClient(Protocol):
         self, *, from_id: str, to_id: str, owner_id: str, relationship: str
     ) -> None:
         """Create a directed relationship between two entity nodes."""
-
