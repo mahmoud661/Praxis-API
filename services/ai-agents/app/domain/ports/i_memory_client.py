@@ -14,6 +14,7 @@ class MemoryHit:
     source: str
     entities: list[str] = field(default_factory=list)
     thread_name: str = ""
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,8 +45,15 @@ class IMemoryClient(Protocol):
         content: str,
         memory_type: str,
         thread_id: str | None = None,
+        tags: list[str] | None = None,
     ) -> str:
         """Queue a memory episode for background extraction. Returns episode_id."""
+
+    async def delete_episode(self, *, owner_id: str, episode_id: str) -> bool:
+        """Delete a specific episode by id. Returns True if found and deleted."""
+
+    async def get_episode_status(self, *, owner_id: str, episode_id: str) -> bool:
+        """Return True if the episode has been fully extracted."""
 
     async def forget(self, *, owner_id: str, query: str) -> int:
         """Search for memories matching query and delete them. Returns count deleted."""

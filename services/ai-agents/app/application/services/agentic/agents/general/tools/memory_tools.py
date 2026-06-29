@@ -1,11 +1,13 @@
 """
 Long-term memory tools for the general agent.
 
-Four tools, one responsibility each:
+Six tools, one responsibility each:
   - memory_search       : retrieve relevant episodes/facts from Graphiti
   - memory_store        : persist something worth remembering across sessions
   - memory_forget       : delete specific memories the user wants removed
   - memory_graph_search : query structured relationship triples from the graph
+  - memory_list         : list recent memories without a search query
+  - memory_update       : correct or replace an existing memory by episode_id
 
 `owner_id` comes from the LangChain `RunnableConfig` — same pattern as
 `kb_search` — so memory is always scoped to the right user without the
@@ -24,7 +26,7 @@ from langchain_core.tools import BaseTool, tool
 if TYPE_CHECKING:
     from .......domain.ports.i_memory_client import IMemoryClient
 
-_DEFAULT_K = 10
+from .......domain.memory_settings import MEMORY_LIST_MAX_K, MEMORY_SEARCH_K
 
 
 def make_memory_search_tool(*, memory_client: "IMemoryClient") -> BaseTool:
@@ -62,7 +64,7 @@ def make_memory_search_tool(*, memory_client: "IMemoryClient") -> BaseTool:
             return "[tool error] empty query."
         try:
             hits = await memory_client.search(
-                owner_id=owner_id, query=cleaned, k=_DEFAULT_K,
+                owner_id=owner_id, query=cleaned, k=MEMORY_SEARCH_K,
                 memory_type=memory_type,
             )
         except Exception as exc:  # noqa: BLE001
@@ -98,7 +100,14 @@ def make_memory_store_tool(*, memory_client: "IMemoryClient") -> BaseTool:
                 "(e.g. 'User prefers Python and dislikes verbose APIs')."
             ),
         ],
-        config: RunnableConfig,
+        tags: Annotated[
+            list[str],
+            (
+                "Optional labels for this memory (e.g. ['work', 'preference', 'goal']). "
+                "Tags help filter and organise memories. Pass [] if none apply."
+            ),
+        ] = [],
+        config: RunnableConfig = None,
     ) -> str:
         """Persist a piece of information to the user's long-term memory.
 
@@ -122,6 +131,7 @@ def make_memory_store_tool(*, memory_client: "IMemoryClient") -> BaseTool:
                 content=cleaned,
                 memory_type=memory_type,
                 thread_id=thread_id,
+                tags=tags or [],
             )
         except Exception as exc:  # noqa: BLE001
             detail = str(exc) or type(exc).__name__
@@ -158,7 +168,7 @@ def make_memory_graph_search_tool(*, memory_client: "IMemoryClient") -> BaseTool
             return "[tool error] empty entity name."
         try:
             triples = await memory_client.graph_search(
-                owner_id=owner_id, entity=cleaned, k=10
+                owner_id=owner_id, entity=cleaned, k=MEMORY_SEARCH_K
             )
         except Exception as exc:  # noqa: BLE001
             return f"[tool error] memory graph search failed: {exc}"
@@ -203,6 +213,97 @@ def make_memory_forget_tool(*, memory_client: "IMemoryClient") -> BaseTool:
 
     return memory_forget
 
+
+def make_memory_list_tool(*, memory_client: "IMemoryClient") -> BaseTool:
+    """Return the `memory_list` tool with `memory_client` in its closure."""
+
+    @tool
+    async def memory_list(
+        k: Annotated[int, "Number of recent memories to return (1-20)."] = MEMORY_SEARCH_K,
+        config: RunnableConfig = None,
+    ) -> str:
+        """List the user's most recent memories without a search query.
+
+        Use this when the user asks 'what do you know about me?', 'show me
+        your memories', or 'what have I told you before?'. Returns memories
+        sorted by recency. For topic-specific recall, use memory_search instead.
+        """
+        owner_id = _owner_id(config)
+        if owner_id is None:
+            return "[tool error] missing owner_id — cannot list memories."
+        k = max(1, min(k, MEMORY_LIST_MAX_K))
+        try:
+            hits = await memory_client.search(
+                owner_id=owner_id, query="", k=k, memory_type="all"
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"[tool error] memory list failed: {exc}"
+        if not hits:
+            return "[tool note] no memories stored yet."
+        parts: list[str] = []
+        for i, h in enumerate(hits, 1):
+            tag_str = f" [tags: {', '.join(h.tags)}]" if h.tags else ""
+            thread = f" [from: {h.thread_name}]" if h.thread_name else ""
+            parts.append(
+                f"[{i}] source={h.source}{thread}{tag_str}\n{h.excerpt}"
+            )
+        return "\n\n".join(parts)
+
+    return memory_list
+
+
+def make_memory_update_tool(*, memory_client: "IMemoryClient") -> BaseTool:
+    """Return the `memory_update` tool with `memory_client` in its closure."""
+
+    @tool
+    async def memory_update(
+        episode_id: Annotated[
+            str,
+            "The episode_id of the memory to replace (from a previous memory_search or memory_list result).",
+        ],
+        new_content: Annotated[str, "The corrected or updated memory content."],
+        memory_type: Annotated[
+            Literal["episodic", "semantic"],
+            "'episodic' for events, 'semantic' for facts or preferences.",
+        ],
+        config: RunnableConfig = None,
+    ) -> str:
+        """Replace an existing memory with corrected content.
+
+        Use when the user says 'that memory is wrong', 'update what you know
+        about X', or 'correct that'. Deletes the old episode by id and stores
+        the new content. Use memory_search first to find the episode_id.
+        """
+        owner_id = _owner_id(config)
+        if owner_id is None:
+            return "[tool error] missing owner_id — cannot update memory."
+        cleaned = new_content.strip()
+        if not cleaned:
+            return "[tool error] empty new_content."
+        thread_id = _thread_id(config)
+        try:
+            deleted = await memory_client.delete_episode(
+                owner_id=owner_id, episode_id=episode_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"[tool error] failed to delete old episode: {exc}"
+        if not deleted:
+            return f"[tool error] no memory found with episode_id={episode_id}."
+        try:
+            new_id = await memory_client.store(
+                owner_id=owner_id,
+                content=cleaned,
+                memory_type=memory_type,
+                thread_id=thread_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"[tool error] old memory deleted but re-store failed: {exc}"
+        return (
+            f"Memory updated. Deleted episode_id={episode_id}. "
+            f"New episode_id={new_id} queued for extraction."
+        )
+
+    return memory_update
 
 
 def _owner_id(config: RunnableConfig | None) -> str | None:

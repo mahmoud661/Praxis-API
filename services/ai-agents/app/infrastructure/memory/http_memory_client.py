@@ -32,6 +32,25 @@ class HttpMemoryClient:
     async def search(
         self, *, owner_id: str, query: str, k: int = 10, memory_type: str = "all"
     ) -> list[MemoryHit]:
+        # Empty query → list endpoint (/search enforces min_length=1 on q).
+        if not query.strip():
+            r = await self._http.get(
+                "/knowledge/memories",
+                params={"k": k},
+                headers={"x-user-id": owner_id},
+            )
+            r.raise_for_status()
+            return [
+                MemoryHit(
+                    excerpt=h["excerpt"],
+                    score=float(h.get("score", 1.0)),
+                    source=h.get("source", ""),
+                    entities=h.get("entities") or [],
+                    thread_name=h.get("thread_name") or "",
+                    tags=h.get("tags") or [],
+                )
+                for h in r.json()
+            ]
         params: dict = {"q": query, "k": k}
         if memory_type != "all":
             params["source"] = "fact" if memory_type == "semantic" else "conversation"
@@ -48,16 +67,25 @@ class HttpMemoryClient:
                 source=h.get("source", ""),
                 entities=h.get("entities") or [],
                 thread_name=h.get("thread_name") or "",
+                tags=h.get("tags") or [],
             )
             for h in r.json().get("hits", [])
         ]
 
     async def store(
-        self, *, owner_id: str, content: str, memory_type: str, thread_id: str | None = None
+        self,
+        *,
+        owner_id: str,
+        content: str,
+        memory_type: str,
+        thread_id: str | None = None,
+        tags: list[str] | None = None,
     ) -> str:
         body: dict = {"content": content, "memory_type": memory_type}
         if thread_id:
             body["thread_id"] = thread_id
+        if tags:
+            body["tags"] = tags
         # Endpoint returns immediately (202-style) — extraction runs in the
         # memory service background, so the default 5s timeout is enough.
         r = await self._http.post(
@@ -67,6 +95,24 @@ class HttpMemoryClient:
         )
         r.raise_for_status()
         return r.json().get("episode_id", "")
+
+    async def delete_episode(self, *, owner_id: str, episode_id: str) -> bool:
+        r = await self._http.delete(
+            f"/knowledge/episodes/{episode_id}",
+            headers={"x-user-id": owner_id},
+        )
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        return True
+
+    async def get_episode_status(self, *, owner_id: str, episode_id: str) -> bool:
+        r = await self._http.get(
+            f"/knowledge/episodes/{episode_id}/status",
+            headers={"x-user-id": owner_id},
+        )
+        r.raise_for_status()
+        return bool(r.json().get("extracted", False))
 
     async def forget(self, *, owner_id: str, query: str) -> int:
         r = await self._http.post(

@@ -6,6 +6,7 @@ adapter stays pure infrastructure.
 from __future__ import annotations
 
 import uuid
+from time import monotonic
 
 from ..domain.ports.logger import Logger
 from ..domain.ports.memory_store import (
@@ -15,14 +16,22 @@ from ..domain.ports.memory_store import (
     MemoryEntity,
     MemorySearchHit,
 )
+from ..domain.settings import (
+    CONTEXT_CACHE_TTL,
+    DEFAULT_LIST_K,
+    FORGET_SCORE_THRESHOLD,
+    MAX_EPISODE_CHARS,
+)
+
+# In-process TTL cache keyed by owner_id → (context_str, expiry_monotonic).
+# Single-process service: no Redis needed.
+_CONTEXT_CACHE: dict[str, tuple[str, float]] = {}
 
 
 class MemoryService:
     def __init__(self, store: IMemoryStore, logger: Logger) -> None:
         self._store = store
         self._logger = logger
-
-    _MAX_EPISODE_CHARS = 4000  # ~1000 tokens — keeps Graphiti extraction reliable
 
     async def add_episode(
         self,
@@ -32,18 +41,20 @@ class MemoryService:
         source: str = "conversation",
         thread_id: str | None = None,
         episode_id: str | None = None,
+        tags: list[str] | None = None,
     ) -> str:
         content = content.strip()
         if not content:
             return ""
-        if len(content) > self._MAX_EPISODE_CHARS:
-            content = content[: self._MAX_EPISODE_CHARS]
+        if len(content) > MAX_EPISODE_CHARS:
+            content = content[:MAX_EPISODE_CHARS]
         episode = Episode(
             id=episode_id or str(uuid.uuid4()),
             owner_id=owner_id,
             content=content,
             source=source,
             thread_id=thread_id or "",
+            tags=tags or [],
         )
         try:
             episode_id = await self._store.add_episode(episode)
@@ -55,6 +66,10 @@ class MemoryService:
                 error=str(exc),
             )
             raise
+        # Invalidate context cache so the next get_context_summary reflects
+        # the new episode (the cache would otherwise serve stale context for
+        # up to CONTEXT_CACHE_TTL seconds after a new memory is stored).
+        _CONTEXT_CACHE.pop(owner_id, None)
         self._logger.info("memory.episode_added", owner_id=owner_id, source=source)
         return episode_id
 
@@ -76,7 +91,7 @@ class MemoryService:
         return hits
 
     async def list_memories(
-        self, *, owner_id: str, k: int = 20
+        self, *, owner_id: str, k: int = DEFAULT_LIST_K
     ) -> list[MemorySearchHit]:
         """List recent episodes — calls store with empty query, bypassing the
         blank-query guard in `search` which is designed for explicit user searches."""
@@ -195,8 +210,12 @@ class MemoryService:
 
         Pulls top extracted entities, recent threads, and stored facts from
         Neo4j and formats them into a brief paragraph the agent injects as a
-        SystemMessage at the start of each new thread.
+        SystemMessage at the start of each new thread. Result is cached for
+        CONTEXT_CACHE_TTL seconds and invalidated whenever a new episode is stored.
         """
+        cached = _CONTEXT_CACHE.get(owner_id)
+        if cached and monotonic() < cached[1]:
+            return cached[0]
         data = await self._store.get_summary(owner_id=owner_id)
         entities: list[dict] = data.get("entities", [])
         threads: list[str] = data.get("threads", [])
@@ -223,7 +242,33 @@ class MemoryService:
             "Use this context to personalise your responses. "
             "Call memory_search for deeper recall on any topic."
         )
-        return "\n".join(lines)
+        context = "\n".join(lines)
+        _CONTEXT_CACHE[owner_id] = (context, monotonic() + CONTEXT_CACHE_TTL)
+        return context
+
+    async def get_episode_status(self, *, owner_id: str, episode_id: str) -> bool:
+        """Return True if the episode has been fully extracted (raw_content stamped)."""
+        return await self._store.get_episode_status(
+            owner_id=owner_id, episode_id=episode_id
+        )
+
+    async def export_memories(
+        self, *, owner_id: str, tag: str | None = None
+    ) -> list[dict]:
+        """Export all episodes with metadata. Optional tag filter."""
+        return await self._store.export_episodes(owner_id=owner_id, tag=tag)
+
+    async def delete_episode(self, *, owner_id: str, episode_id: str) -> bool:
+        """Delete a specific episode by id. Returns True if found and deleted."""
+        deleted = await self._store.delete_episode(
+            owner_id=owner_id, episode_id=episode_id
+        )
+        if deleted:
+            _CONTEXT_CACHE.pop(owner_id, None)
+            self._logger.info(
+                "memory.episode_deleted", owner_id=owner_id, episode_id=episode_id
+            )
+        return deleted
 
     async def get_entity_triples(
         self, *, owner_id: str, entity_name: str, k: int = 10
@@ -234,16 +279,11 @@ class MemoryService:
         )
 
     async def forget(self, *, owner_id: str, query: str) -> int:
-        """Search for episodes matching query and delete only high-confidence matches.
-
-        A score threshold of 0.6 prevents loosely-related episodes from being
-        deleted when the user asks to forget something specific.
-        """
-        _FORGET_THRESHOLD = 0.6
+        """Search for episodes matching query and delete only high-confidence matches."""
         hits = await self._store.search(owner_id=owner_id, query=query, k=5)
         if not hits:
             return 0
-        relevant = [h for h in hits if h.score >= _FORGET_THRESHOLD and h.episode_id]
+        relevant = [h for h in hits if h.score >= FORGET_SCORE_THRESHOLD and h.episode_id]
         if not relevant:
             return 0
         deleted = await self._store.delete_episodes(

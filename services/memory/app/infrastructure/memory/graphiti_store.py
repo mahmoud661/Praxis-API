@@ -10,6 +10,7 @@ embeds the episode for hybrid retrieval.
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -18,8 +19,8 @@ from graphiti_core.cross_encoder import OpenAIRerankerClient
 from graphiti_core.embedder import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.llm_client.openai_client import LLMConfig, OpenAIClient
 from graphiti_core.nodes import EpisodeType
-from pydantic import BaseModel
 
+from ...domain.entity_types import ENTITY_TYPES
 from ...domain.ports.memory_store import (
     Episode,
     GraphEdge,
@@ -28,45 +29,7 @@ from ...domain.ports.memory_store import (
     MemoryEntity,
     MemorySearchHit,
 )
-
-
-class Person(BaseModel):
-    """A human being — the user themselves, a colleague, friend, family member, or public figure."""
-
-
-class Organization(BaseModel):
-    """A company, institution, team, government body, or any named group of people."""
-
-
-class Place(BaseModel):
-    """A geographic location — country, city, region, landmark, or physical place."""
-
-
-class Concept(BaseModel):
-    """An abstract idea, technology, framework, methodology, skill, or domain of knowledge."""
-
-
-class Event(BaseModel):
-    """A specific occurrence — a meeting, project, deadline, or milestone."""
-
-
-class Preference(BaseModel):
-    """A preference, taste, like, dislike, or habitual behavior of the user."""
-
-
-class Fact(BaseModel):
-    """A factual statement, belief, or piece of information about the user or their world."""
-
-
-_ENTITY_TYPES: dict[str, type[BaseModel]] = {
-    "Person":       Person,
-    "Organization": Organization,
-    "Place":        Place,
-    "Concept":      Concept,
-    "Event":        Event,
-    "Preference":   Preference,
-    "Fact":         Fact,
-}
+from ...domain.settings import SEMANTIC_DEDUP_THRESHOLD
 
 
 def _parse_dt(value: str) -> datetime:
@@ -81,17 +44,13 @@ def _parse_dt(value: str) -> datetime:
 
 
 def _strip_speaker_prefix(text: str) -> str:
-    """Strip the 'SpeakerName: ' prefix we prepend before Graphiti ingestion.
+    """Remove the 'Name: ' speaker prefix added before ingestion.
 
-    We prefix episode bodies with the user's entity name so Graphiti's
-    extraction links entities back to the correct speaker node. That prefix
-    must be removed before the text is shown to the user or injected into
-    the agent's context, or it reads as redundant noise.
+    Only used as a fallback for legacy nodes that pre-date the raw_content field.
     """
     if ": " in text:
         return text.split(": ", 1)[1]
     return text
-
 
 
 class GraphitiMemoryStore:
@@ -142,9 +101,7 @@ class GraphitiMemoryStore:
     async def add_episode(self, episode: Episode) -> str:
         episode_id = episode.id or str(uuid.uuid4())
 
-        # Deduplication: skip Graphiti extraction if identical content was
-        # already stored for this owner. The hash is set on the Episodic node
-        # after extraction so a second call with the same text is a no-op.
+        # SHA-256 exact dedup — skip extraction if this owner already has identical content.
         content_hash = hashlib.sha256(
             f"{episode.owner_id}:{episode.content}".encode()
         ).hexdigest()
@@ -160,10 +117,26 @@ class GraphitiMemoryStore:
             if dup_record:
                 return dup_record["name"]
 
+        # Semantic dedup: for fact episodes, skip re-extraction if a very
+        # similar episode already exists. Catches near-duplicates SHA-256 misses.
+        if episode.source == "fact":
+            similar = await self._graphiti.search(
+                query=episode.content[:500],
+                group_ids=[episode.owner_id],
+                num_results=1,
+            )
+            if similar:
+                top_score = float(getattr(similar[0], "score", 0.0))
+                if top_score >= SEMANTIC_DEDUP_THRESHOLD:
+                    existing_id = (
+                        getattr(similar[0], "name", "")
+                        or getattr(similar[0], "uuid", "")
+                    )
+                    if existing_id:
+                        return existing_id
+
         user_name = await self._get_entity_name(episode.owner_id)
-        # Prefix with the user's known entity name so Graphiti's extract_message
-        # prompt extracts them as the speaker and deduplicates against the
-        # existing provisioned user node, linking all entities back to it.
+        # Speaker prefix ties extracted entities back to the provisioned user node.
         formatted_body = f"{user_name}: {episode.content}" if user_name else episode.content
         await self._graphiti.add_episode(
             name=episode_id,
@@ -172,42 +145,33 @@ class GraphitiMemoryStore:
             source_description=episode.source,
             reference_time=episode.created_at or datetime.now(tz=timezone.utc),
             group_id=episode.owner_id,
-            entity_types=_ENTITY_TYPES,
+            entity_types=ENTITY_TYPES,
         )
-        # Stamp the content hash (for dedup on future calls) and raw_content
-        # (the original agent input, before the speaker prefix is applied for
-        # Graphiti ingestion). raw_content is what agents and the frontend see
-        # as the memory excerpt — it preserves exact wording without fragile
-        # prefix-stripping at read time.
+        # Stamp dedup hash, original content (raw_content), and caller tags on the node.
         async with driver.session() as session:
             await session.run(
                 "MATCH (ep:Episodic {name: $name, group_id: $g}) "
-                "SET ep.content_hash = $h, ep.raw_content = $raw",
+                "SET ep.content_hash = $h, ep.raw_content = $raw, ep.tags = $tags",
                 name=episode_id,
                 g=episode.owner_id,
                 h=content_hash,
                 raw=episode.content,
+                tags=episode.tags or [],
             )
-        # After extraction, promote any Person entity that was co-mentioned
-        # with the user in this episode as a potential name claim. If the user
-        # entity is still named by email (contains @) and the episode contains
-        # a name-claim phrase, rename the user node so all future episodes use
-        # the real name as the speaker prefix and dedup correctly.
+        # If the user entity still has an email name, try to promote it to a
+        # real name from the episode content. Only when email (contains @) so
+        # named users are never overwritten by a later episode's name-claim.
         promoted = False
         if user_name and "@" in user_name:
             promoted = await self._maybe_promote_user_name(
                 owner_id=episode.owner_id,
-                episode_id=episode_id,
                 current_name=user_name,
                 content=episode.content,
             )
-        # Merge duplicate user-name nodes — only needed right after a name
-        # promotion, since that's the only moment a new node with the same
-        # name can have been created by Graphiti's extraction.
+        # Merge duplicates only after a promotion — that's the only moment a
+        # second node with the same name can appear from extraction.
         if promoted:
             await self._merge_duplicate_user_nodes(owner_id=episode.owner_id)
-        # Link all entities extracted from this episode to the originating
-        # conversation thread node via a DISCUSSED_IN edge.
         if episode.thread_id:
             await self._link_episode_to_thread(
                 owner_id=episode.owner_id,
@@ -220,17 +184,15 @@ class GraphitiMemoryStore:
         self,
         *,
         owner_id: str,
-        episode_id: str,
         current_name: str,
         content: str,
     ) -> bool:
-        """If a name-claim is detected in the content, update the user's entity
-        node name to the stated name so future episodes link correctly.
-        Returns True if the name was actually changed."""
-        import re
-        # Match "my name is X" or "call me X" — case-insensitive so
-        # "my name is mahmoud" works as well as "My name is Mahmoud".
-        # Name must be 1–3 words; stop words filtered after capture.
+        """Detect a name-claim in content and update the user entity node.
+
+        Returns True if the name was changed so the caller knows to merge
+        duplicate nodes created by Graphiti's concurrent extraction.
+        """
+        # Match "my name is X" / "call me X"; name limited to 1–3 words.
         _STOP = {"a", "an", "the", "not", "also", "just", "very", "quite"}
         pattern = re.compile(
             r"(?:my name is|call me)\s+([A-Za-z][A-Za-z'-]+(?:\s+[A-Za-z][A-Za-z'-]+){0,2})",
@@ -259,7 +221,6 @@ class GraphitiMemoryStore:
         into the canonical user node (uuid == owner_id), transferring edges."""
         driver = self._graphiti.driver
         async with driver.session() as session:
-            # Transfer MENTIONS edges from duplicates to the canonical node
             await session.run(
                 """
                 MATCH (root:Entity {uuid: $owner_id, group_id: $owner_id})
@@ -272,7 +233,6 @@ class GraphitiMemoryStore:
                 """,
                 owner_id=owner_id,
             )
-            # Transfer RELATES_TO edges from duplicates to the canonical node
             await session.run(
                 """
                 MATCH (root:Entity {uuid: $owner_id, group_id: $owner_id})
@@ -289,7 +249,6 @@ class GraphitiMemoryStore:
                 """,
                 owner_id=owner_id,
             )
-            # Transfer incoming RELATES_TO edges
             await session.run(
                 """
                 MATCH (root:Entity {uuid: $owner_id, group_id: $owner_id})
@@ -306,7 +265,6 @@ class GraphitiMemoryStore:
                 """,
                 owner_id=owner_id,
             )
-            # Delete the now-orphaned duplicate nodes
             await session.run(
                 """
                 MATCH (root:Entity {uuid: $owner_id, group_id: $owner_id})
@@ -405,16 +363,13 @@ class GraphitiMemoryStore:
                 # the Graphiti-stored body for nodes written before this field.
                 hit.excerpt = meta.get("raw_content") or _strip_speaker_prefix(hit.excerpt)
                 hit.thread_name = meta.get("thread_name") or ""
+                hit.tags = meta.get("tags") or []
         return hits
 
     async def _enrich_hits(
         self, *, owner_id: str, episode_ids: list[str]
     ) -> dict[str, dict]:
-        """Single-pass enrichment: raw_content + thread_name for each episode.
-
-        Combines what was two separate Neo4j queries (_fetch_thread_names +
-        a raw_content lookup) into one. Returns {episode_id: {raw_content, thread_name}}.
-        """
+        """Single Neo4j round-trip returning raw_content, tags, and thread_name per episode."""
         if not episode_ids:
             return {}
         driver = self._graphiti.driver
@@ -427,6 +382,7 @@ class GraphitiMemoryStore:
                               -[:DISCUSSED_IN]->(conv:Entity)
                 RETURN eid AS episode_id,
                        ep.raw_content AS raw_content,
+                       ep.tags AS tags,
                        collect(DISTINCT conv.name)[0] AS thread_name
                 """,
                 ids=episode_ids,
@@ -437,6 +393,7 @@ class GraphitiMemoryStore:
             rec["episode_id"]: {
                 "raw_content": rec.get("raw_content") or "",
                 "thread_name": rec.get("thread_name") or "",
+                "tags": rec.get("tags") or [],
             }
             for rec in records
         }
@@ -447,7 +404,6 @@ class GraphitiMemoryStore:
         """Direct Neo4j query for recent episodes — bypasses LLM search."""
         driver = self._graphiti.driver
         async with driver.session() as session:
-            # Conditional source filter — only added when caller requests it.
             src_clause = "AND e.source_description = $src" if source_filter else ""
             result = await session.run(
                 f"""
@@ -460,6 +416,7 @@ class GraphitiMemoryStore:
                        e.raw_content AS raw_content,
                        e.content AS content,
                        e.source_description AS source,
+                       e.tags AS tags,
                        thread_name
                 ORDER BY e.created_at DESC
                 LIMIT $k
@@ -483,6 +440,7 @@ class GraphitiMemoryStore:
                     score=1.0,
                     source=rec.get("source") or "",
                     thread_name=rec.get("thread_name") or "",
+                    tags=rec.get("tags") or [],
                 )
             )
         return results
@@ -522,7 +480,6 @@ class GraphitiMemoryStore:
         """Return entity nodes and their Neo4j relationships for graph rendering."""
         driver = self._graphiti.driver
         async with driver.session() as session:
-            # Fetch all entity nodes for this owner
             node_result = await session.run(
                 """
                 MATCH (n:Entity)
@@ -590,8 +547,6 @@ class GraphitiMemoryStore:
         """
         driver = self._graphiti.driver
         async with driver.session() as session:
-            # Most-connected non-provisioned, non-deleted entities (the
-            # interesting ones Graphiti extracted, not platform scaffolding).
             entity_result = await session.run(
                 """
                 MATCH (n:Entity {group_id: $g})
@@ -607,7 +562,6 @@ class GraphitiMemoryStore:
             )
             entity_records = await entity_result.data()
 
-            # Recent conversation thread names.
             thread_result = await session.run(
                 """
                 MATCH (c:Entity:Conversation {group_id: $g})
@@ -619,9 +573,6 @@ class GraphitiMemoryStore:
             )
             thread_records = await thread_result.data()
 
-            # Most recent semantic memories (facts/preferences).
-            # Prefer raw_content (original agent input, no speaker prefix);
-            # fall back to e.content for nodes written before raw_content existed.
             fact_result = await session.run(
                 """
                 MATCH (e:Episodic {group_id: $g, source_description: "fact"})
@@ -820,8 +771,8 @@ class GraphitiMemoryStore:
         orphaned (no remaining MENTIONS from any episode, not provisioned)."""
         driver = self._graphiti.driver
         async with driver.session() as session:
-            # Step 1: collect entity node IDs mentioned only by these episodes
-            # before we sever the edges, so we know what to clean up.
+            # Collect entity node IDs that would become orphaned BEFORE deleting
+            # the episodes — once edges are severed the query can't find them.
             orphan_result = await session.run(
                 """
                 UNWIND $ids AS eid
@@ -842,7 +793,6 @@ class GraphitiMemoryStore:
             orphan_record = await orphan_result.single()
             orphan_ids: list[int] = (orphan_record["orphan_ids"] if orphan_record else []) or []
 
-            # Step 2: delete the episodes themselves.
             del_result = await session.run(
                 """
                 UNWIND $ids AS eid
@@ -856,7 +806,6 @@ class GraphitiMemoryStore:
             del_record = await del_result.single()
             deleted = del_record["deleted"] if del_record else 0
 
-            # Step 3: delete orphaned entity nodes (no remaining episode links).
             if orphan_ids:
                 await session.run(
                     "UNWIND $ids AS nid MATCH (n) WHERE id(n) = nid DETACH DELETE n",
@@ -865,6 +814,67 @@ class GraphitiMemoryStore:
 
             return deleted
 
+    async def delete_episode(self, *, owner_id: str, episode_id: str) -> bool:
+        """Delete a single episode by id. Returns True if found and deleted."""
+        deleted = await self.delete_episodes(
+            owner_id=owner_id, episode_ids=[episode_id]
+        )
+        return deleted > 0
+
+    async def get_episode_status(self, *, owner_id: str, episode_id: str) -> bool:
+        """Return True if the episode's raw_content has been stamped (extraction done)."""
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (ep:Episodic {name: $name, group_id: $g})
+                RETURN ep.raw_content IS NOT NULL AS extracted
+                """,
+                name=episode_id,
+                g=owner_id,
+            )
+            record = await result.single()
+        if record is None:
+            return False
+        return bool(record["extracted"])
+
+    async def export_episodes(
+        self, *, owner_id: str, tag: str | None = None
+    ) -> list[dict]:
+        """Export all episodes with their metadata. Optional tag filter."""
+        driver = self._graphiti.driver
+        async with driver.session() as session:
+            tag_clause = "AND $tag IN ep.tags" if tag else ""
+            result = await session.run(
+                f"""
+                MATCH (ep:Episodic {{group_id: $g}})
+                WHERE true {tag_clause}
+                OPTIONAL MATCH (ep)-[:MENTIONS]->(ent:Entity {{group_id: $g}})
+                WITH ep, collect(DISTINCT ent.name) AS entities
+                RETURN ep.name          AS episode_id,
+                       coalesce(ep.raw_content, ep.content) AS content,
+                       ep.source_description AS source,
+                       toString(ep.created_at) AS created_at,
+                       ep.tags         AS tags,
+                       entities
+                ORDER BY ep.created_at DESC
+                """,
+                g=owner_id,
+                tag=tag or "",
+            )
+            records = await result.data()
+        return [
+            {
+                "episode_id": r.get("episode_id", ""),
+                "content": (r.get("content") or "")[:2000],
+                "source": r.get("source") or "",
+                "created_at": r.get("created_at") or "",
+                "tags": r.get("tags") or [],
+                "entities": r.get("entities") or [],
+            }
+            for r in records
+        ]
+
     async def delete_by_owner(self, *, owner_id: str) -> None:
         """Delete all episodic memory for this owner without touching provisioned
         nodes (user entity, conversation/attachment nodes created by the platform).
@@ -872,14 +882,11 @@ class GraphitiMemoryStore:
         """
         driver = self._graphiti.driver
         async with driver.session() as session:
-            # 1. Delete all Episodic nodes (the actual memory episodes).
             await session.run(
                 "MATCH (n:Episodic {group_id: $group_id}) DETACH DELETE n",
                 group_id=owner_id,
             )
-            # 2. Delete Entity nodes created by Graphiti extraction (not provisioned).
-            #    Provisioned nodes (user, conversation, attachment) have provisioned=true
-            #    and must survive so the user's identity stays intact.
+            # provisioned=true nodes (user, conversation, attachment) must survive.
             await session.run(
                 """
                 MATCH (n:Entity {group_id: $group_id})

@@ -5,20 +5,39 @@ All routes read X-User-Id forwarded by the gateway after session auth —
 the memory service never issues or validates sessions itself.
 """
 import uuid
-from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
-from pydantic import BaseModel
 
 from ...application.memory_service import MemoryService
+from ..schemas import (
+    ContextSummaryOut,
+    EntityOut,
+    EpisodeExportOut,
+    EpisodeIn,
+    EpisodeOut,
+    EpisodeStatusOut,
+    ExportOut,
+    ForgetIn,
+    ForgetOut,
+    GraphEdgeOut,
+    GraphNodeOut,
+    GraphTripleOut,
+    GraphTriplesOut,
+    KnowledgeGraphOut,
+    MemoryEpisodeOut,
+    SearchResultsOut,
+)
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
 # Process-lifetime set of already-provisioned user IDs.
-# The first GET /graph call provisions the user in Neo4j; all subsequent
-# calls skip the write entirely. Resets only on service restart, which is
-# fine — provision_user is idempotent so the worst case is one extra MERGE.
+# provision_user is idempotent so the worst case on restart is one extra MERGE.
 _provisioned: set[str] = set()
+
+_SOURCE_BY_TYPE: dict[str, str] = {
+    "episodic": "conversation",
+    "semantic": "fact",
+}
 
 
 def _require_user(x_user_id: str | None) -> str:
@@ -32,73 +51,12 @@ async def _ensure_user_entity(
     owner_id: str,
     email: str | None,
 ) -> None:
-    """Lazy-provision the Person entity for this user on first visit only.
-    Skipped on all subsequent requests (process-lifetime cache) and when
-    email is unavailable (direct service calls / tests)."""
+    """Lazy-provision the Person entity for this user on first visit only."""
     if not email or owner_id in _provisioned:
         return
     await service.provision_user(owner_id=owner_id, email=email, registered_at="")
     _provisioned.add(owner_id)
 
-
-# ---- response models ---------------------------------------------------------
-
-class MemoryEpisodeOut(BaseModel):
-    episode_id: str
-    excerpt: str
-    score: float
-    source: str
-    entities: list[str]
-    thread_name: str = ""
-
-
-class EntityOut(BaseModel):
-    name: str
-    type: str
-    summary: str
-
-
-_SOURCE_BY_TYPE: dict[str, str] = {
-    "episodic": "conversation",
-    "semantic": "fact",
-}
-
-
-class EpisodeIn(BaseModel):
-    content: str
-    memory_type: Literal["episodic", "semantic"] = "episodic"
-    thread_id: str | None = None
-
-
-class EpisodeOut(BaseModel):
-    episode_id: str
-
-
-class GraphNodeOut(BaseModel):
-    id: str
-    name: str
-    type: str
-    summary: str
-    uuid: str = ""
-    deleted_at: str | None = None
-
-
-class GraphEdgeOut(BaseModel):
-    source: str
-    target: str
-    label: str
-
-
-class KnowledgeGraphOut(BaseModel):
-    nodes: list[GraphNodeOut]
-    edges: list[GraphEdgeOut]
-
-
-class SearchResultsOut(BaseModel):
-    hits: list[MemoryEpisodeOut]
-
-
-# ---- routes ------------------------------------------------------------------
 
 def make_knowledge_router(service: MemoryService) -> APIRouter:
     @router.get("/memories", response_model=list[MemoryEpisodeOut])
@@ -117,6 +75,7 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
                 source=h.source,
                 entities=h.entities,
                 thread_name=h.thread_name,
+                tags=h.tags,
             )
             for h in hits
         ]
@@ -140,6 +99,7 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
                     source=h.source,
                     entities=h.entities,
                     thread_name=h.thread_name,
+                    tags=h.tags,
                 )
                 for h in hits
             ]
@@ -153,10 +113,7 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
         """Entities extracted from the user's knowledge graph."""
         owner_id = _require_user(x_user_id)
         entities = await service.list_entities(owner_id=owner_id, limit=limit)
-        return [
-            EntityOut(name=e.name, type=e.type, summary=e.summary)
-            for e in entities
-        ]
+        return [EntityOut(name=e.name, type=e.type, summary=e.summary) for e in entities]
 
     @router.get("/graph", response_model=KnowledgeGraphOut)
     async def get_graph(
@@ -201,30 +158,55 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
             source=_SOURCE_BY_TYPE[body.memory_type],
             thread_id=body.thread_id,
             episode_id=episode_id,
+            tags=body.tags or [],
         )
         return EpisodeOut(episode_id=episode_id)
 
-    class ContextSummaryOut(BaseModel):
-        context: str
+    @router.get("/episodes/{episode_id}/status", response_model=EpisodeStatusOut)
+    async def get_episode_status(
+        episode_id: str,
+        x_user_id: str | None = Header(default=None),
+    ) -> EpisodeStatusOut:
+        """Return whether a queued episode has finished background extraction.
 
-    class GraphTripleOut(BaseModel):
-        subject: str
-        predicate: str
-        object: str
-        fact: str
+        Extracted is True once raw_content is stamped on the Episodic node.
+        Callers may poll this after receiving a 201 from POST /episodes.
+        """
+        owner_id = _require_user(x_user_id)
+        extracted = await service.get_episode_status(
+            owner_id=owner_id, episode_id=episode_id
+        )
+        return EpisodeStatusOut(episode_id=episode_id, extracted=extracted)
 
-    class GraphTriplesOut(BaseModel):
-        triples: list[GraphTripleOut]
+    @router.delete("/episodes/{episode_id}", status_code=204)
+    async def delete_episode(
+        episode_id: str,
+        x_user_id: str | None = Header(default=None),
+    ) -> None:
+        """Delete a specific episode by id. Returns 204 if deleted, 404 if not found."""
+        owner_id = _require_user(x_user_id)
+        found = await service.delete_episode(owner_id=owner_id, episode_id=episode_id)
+        if not found:
+            raise HTTPException(status_code=404, detail="Episode not found.")
+
+    @router.get("/memories/export", response_model=ExportOut)
+    async def export_memories(
+        tag: str | None = Query(default=None, description="Filter by tag"),
+        x_user_id: str | None = Header(default=None),
+    ) -> ExportOut:
+        """Export all memory episodes. Optional ?tag= filter."""
+        owner_id = _require_user(x_user_id)
+        episodes = await service.export_memories(owner_id=owner_id, tag=tag)
+        return ExportOut(
+            episodes=[EpisodeExportOut(**ep) for ep in episodes],
+            total=len(episodes),
+        )
 
     @router.get("/summary", response_model=ContextSummaryOut)
     async def get_context_summary(
         x_user_id: str | None = Header(default=None),
     ) -> ContextSummaryOut:
-        """Compact context string about the user for agent injection.
-
-        Called by the agent runner before the first turn of a new thread to
-        prime the model with what it already knows about the user.
-        """
+        """Compact context string about the user for agent injection."""
         owner_id = _require_user(x_user_id)
         context = await service.get_context_summary(owner_id=owner_id)
         return ContextSummaryOut(context=context)
@@ -235,18 +217,12 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
         k: int = Query(default=10, ge=1, le=50),
         x_user_id: str | None = Header(default=None),
     ) -> GraphTriplesOut:
-        """Return RELATES_TO triples for entities matching the given name.
-
-        Used by the memory_graph_search agent tool to surface structured
-        relationship facts rather than raw episode excerpts.
-        """
+        """Return RELATES_TO triples for entities matching the given name."""
         owner_id = _require_user(x_user_id)
         triples = await service.get_entity_triples(
             owner_id=owner_id, entity_name=entity, k=k
         )
-        return GraphTriplesOut(
-            triples=[GraphTripleOut(**t) for t in triples]
-        )
+        return GraphTriplesOut(triples=[GraphTripleOut(**t) for t in triples])
 
     @router.delete("/memories", status_code=204)
     async def delete_memories(
@@ -256,22 +232,12 @@ def make_knowledge_router(service: MemoryService) -> APIRouter:
         owner_id = _require_user(x_user_id)
         await service.delete_memories(owner_id=owner_id)
 
-    class ForgetIn(BaseModel):
-        query: str
-
-    class ForgetOut(BaseModel):
-        deleted: int
-
     @router.post("/memories/forget", response_model=ForgetOut)
     async def forget_memories(
         body: ForgetIn,
         x_user_id: str | None = Header(default=None),
     ) -> ForgetOut:
-        """Search for episodes matching a query and delete them.
-
-        Called by the agent when the user says 'forget that X' or
-        'remove the memory about Y'.
-        """
+        """Search for episodes matching a query and delete them."""
         owner_id = _require_user(x_user_id)
         deleted = await service.forget(owner_id=owner_id, query=body.query)
         return ForgetOut(deleted=deleted)

@@ -16,6 +16,7 @@ class Episode:
     source: str                          # "conversation" | "document" | "web"
     id: str = ""
     thread_id: str = ""                  # originating conversation thread
+    tags: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=_utcnow)
 
 
@@ -34,6 +35,7 @@ class MemorySearchHit:
     source: str
     entities: list[str] = field(default_factory=list)
     thread_name: str = ""
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -146,6 +148,20 @@ class IMemoryStore(Protocol):
 
     async def delete_episodes(self, *, owner_id: str, episode_ids: list[str]) -> int:
         """Delete specific episodes by id. Returns count deleted."""
+        pass
+
+    async def delete_episode(self, *, owner_id: str, episode_id: str) -> bool:
+        """Delete a single episode by id. Returns True if found and deleted."""
+        pass
+
+    async def get_episode_status(self, *, owner_id: str, episode_id: str) -> bool:
+        """Return True if the episode has been fully extracted (raw_content stamped)."""
+        pass
+
+    async def export_episodes(
+        self, *, owner_id: str, tag: str | None = None
+    ) -> list[dict]:
+        """Export all episodes with metadata. Optional tag filter."""
         pass
 
     async def get_summary(self, *, owner_id: str) -> dict:

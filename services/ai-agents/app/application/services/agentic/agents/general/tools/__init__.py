@@ -6,14 +6,18 @@ from .kb_search import make_kb_search_tool
 from .memory_tools import (
     make_memory_forget_tool,
     make_memory_graph_search_tool,
+    make_memory_list_tool,
     make_memory_search_tool,
     make_memory_store_tool,
+    make_memory_update_tool,
 )
 
 __all__ = [
     "make_kb_search_tool",
     "make_memory_forget_tool",
     "make_memory_graph_search_tool",
+    "make_memory_list_tool",
     "make_memory_search_tool",
     "make_memory_store_tool",
+    "make_memory_update_tool",
 ]
