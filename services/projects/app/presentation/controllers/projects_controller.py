@@ -30,6 +30,9 @@ class ProjectsController:
         description: str | None,
         github_repo_url: str | None,
         github_token: str | None,
+        setup_commands: list[str] | None = None,
+        start_command: str | None = None,
+        registered_ports: list[int] | None = None,
     ) -> Project:
         return await self._service.create_project(
             user_id=user_id,
@@ -37,6 +40,9 @@ class ProjectsController:
             description=description,
             github_repo_url=github_repo_url,
             github_token=github_token,
+            setup_commands=setup_commands,
+            start_command=start_command,
+            registered_ports=registered_ports,
         )
 
     async def update_project(

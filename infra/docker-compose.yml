@@ -606,15 +606,20 @@ services:
       # the host) to give each sandbox unprivileged nested-Docker capability.
       SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-}
       E2B_API_KEY: ${E2B_API_KEY:-}
+      # Per-sandbox resource caps (local provider): memory in MB, CPUs as a
+      # float, and a pids ceiling (fork-bomb guard). 0 disables a cap.
+      SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-2048}
+      SANDBOX_CPUS: ${SANDBOX_CPUS:-2.0}
+      SANDBOX_PIDS_LIMIT: ${SANDBOX_PIDS_LIMIT:-512}
       CORS_ORIGINS: '${SANDBOX_CORS_ORIGINS:-["*"]}'
     # LOCAL provider only: the service talks to the host Docker daemon via the
     # mounted socket. group_add grants the unprivileged app user (UID 1000)
-    # supplementary membership of the docker group so it can write to the
-    # socket without running as root. Set DOCKER_GID to match the GID of
-    # /var/run/docker.sock on your host if it differs from 999 (run
-    # `stat -c %g /var/run/docker.sock` to find it).
+    # supplementary membership of the socket's group so it can write to the
+    # socket without running as root. On Docker Desktop for Windows the socket
+    # is always owned by root:root (GID 0); on native Linux it's typically the
+    # docker group (GID 999). Override DOCKER_GID if yours differs.
     group_add:
-      - "${DOCKER_GID:-999}"
+      - "${DOCKER_GID:-0}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

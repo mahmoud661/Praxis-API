@@ -61,6 +61,9 @@ class ProjectsRoute(BaseRoute):
                 description=body.description,
                 github_repo_url=body.github_repo_url,
                 github_token=body.github_token,
+                setup_commands=body.setup_commands,
+                start_command=body.start_command,
+                registered_ports=body.registered_ports,
             )
             return ProjectOut.from_model(project)
 

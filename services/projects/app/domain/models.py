@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Index, LargeBinary, String, Text
+from sqlalchemy import JSON, DateTime, Index, LargeBinary, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -54,6 +54,22 @@ class Project(Base):
     # Identifier of the E2B / Daytona sandbox associated with this project.
     # NULL until the orchestrator assigns one.
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # .praxis config — shell commands that run automatically every time the
+    # sandbox starts (e.g. ["npm install", "pip install -r requirements.txt"]).
+    setup_commands: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+
+    # Optional command used by the Run button (e.g. "npm run dev").
+    start_command: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
+    # Ports the project app is expected to listen on.  Shown in the Ports tab
+    # as "registered" before the app is running, and merged with live /proc/net
+    # detection so the user sees them immediately.
+    registered_ports: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

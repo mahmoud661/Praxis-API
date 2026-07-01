@@ -38,6 +38,14 @@ class Env(BaseSettings):
     # and registered in Docker (`docker info` lists sysbox-runc).
     sandbox_runtime: str = ""
 
+    # Per-sandbox resource caps (local provider). Without these a single
+    # runaway `npm install` or dev server can starve the host. Memory is in
+    # megabytes; CPUs is a float (2.0 = two cores). 0 disables the cap.
+    sandbox_memory_mb: int = 2048
+    sandbox_cpus: float = 2.0
+    # Hard cap on processes per sandbox — stops fork bombs cold.
+    sandbox_pids_limit: int = 512
+
     # CORS — allow all by default (gateway enforces auth upstream).
     cors_origins: list[str] = ["*"]
 

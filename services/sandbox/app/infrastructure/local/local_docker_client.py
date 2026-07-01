@@ -91,17 +91,21 @@ def _demux(data: bytes) -> tuple[str, str]:
 
 
 # Idempotent boot of the headless X + VNC stack inside a sandbox container:
-# Xvfb on :99, wait for it, a window manager, a visible xterm, then x11vnc
-# exporting :99 on TCP 5900. pgrep guards make re-runs safe; one exec.
+# Xvfb on :99, wait for it, an openbox session (its autostart — baked into
+# the image — sets the wallpaper and starts picom, tint2, conky and a
+# terminal), then x11vnc exporting :99 on TCP 5900. pgrep guards make
+# re-runs safe; one exec. HOME is set explicitly so openbox's children
+# (sakura, rofi) find their configs under /root.
 _DESKTOP_BOOT = (
     "pgrep -x Xvfb >/dev/null 2>&1 || "
     "(Xvfb :99 -screen 0 1280x720x24 -ac >/tmp/xvfb.log 2>&1 &); "
     "for _ in 1 2 3 4 5 6 7 8 9 10; do "
     "xdpyinfo -display :99 >/dev/null 2>&1 && break; sleep 0.3; done; "
-    "pgrep -x fluxbox >/dev/null 2>&1 || "
-    "(DISPLAY=:99 fluxbox >/tmp/fluxbox.log 2>&1 &); "
-    "pgrep -x xterm >/dev/null 2>&1 || "
-    "(DISPLAY=:99 xterm -geometry 100x30+40+40 >/tmp/xterm.log 2>&1 &); "
+    # SHELL is required by VTE terminals (sakura) to know what to spawn —
+    # without it the terminal opens shell-less and drops every keystroke.
+    "pgrep -x openbox >/dev/null 2>&1 || "
+    "(DISPLAY=:99 HOME=/root SHELL=/bin/bash "
+    "openbox-session >/tmp/openbox.log 2>&1 &); "
     # -xkb: use the XKEYBOARD extension for a complete keysym→keycode map.
     # Without it x11vnc's core mapping drops keys (symbols, shifted chars),
     # so the keyboard only "half works" in the browser.
@@ -194,6 +198,10 @@ class LocalDockerSandboxClient:
         # "" → Docker default runtime (runc); "sysbox-runc" → Sysbox
         # (unprivileged nested Docker). Applied to every sandbox on create.
         self._runtime = env.sandbox_runtime
+        # Per-sandbox resource caps (0 = uncapped).
+        self._memory_mb = env.sandbox_memory_mb
+        self._cpus = env.sandbox_cpus
+        self._pids_limit = env.sandbox_pids_limit
         # Raw docker.sock path — used for the interactive-shell hijack, which
         # httpx's normal request/response cycle can't do.
         self._socket = env.docker_socket
@@ -361,6 +369,16 @@ class LocalDockerSandboxClient:
         if self._runtime:
             # e.g. "sysbox-runc" → unprivileged, Docker-capable sandbox.
             host_config["Runtime"] = self._runtime
+        # Resource caps so one sandbox can't starve the host (or its
+        # siblings). Engine API units: Memory in bytes, NanoCpus in 1e-9 CPU.
+        if self._memory_mb > 0:
+            host_config["Memory"] = self._memory_mb * 1024 * 1024
+            # Same value for memory+swap = no swap escape hatch.
+            host_config["MemorySwap"] = self._memory_mb * 1024 * 1024
+        if self._cpus > 0:
+            host_config["NanoCpus"] = int(self._cpus * 1_000_000_000)
+        if self._pids_limit > 0:
+            host_config["PidsLimit"] = self._pids_limit
         labels = {_LABEL: "true"}
         if project_id:
             # Persistent per-project storage: mount a named volume at

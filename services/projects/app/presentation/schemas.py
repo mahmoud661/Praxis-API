@@ -30,6 +30,9 @@ class ProjectOut(BaseModel):
     # exposing the value or even its encrypted form.
     github_token_set: bool
     sandbox_id: str | None
+    setup_commands: list[str]
+    start_command: str | None
+    registered_ports: list[int]
     created_at: datetime
     updated_at: datetime
 
@@ -56,6 +59,9 @@ class ProjectOut(BaseModel):
             github_repo_url=p.github_repo_url,
             github_token_set=p.github_encrypted_token is not None,
             sandbox_id=p.sandbox_id,
+            setup_commands=p.setup_commands or [],
+            start_command=p.start_command,
+            registered_ports=p.registered_ports or [],
             created_at=p.created_at,
             updated_at=p.updated_at,
         )
@@ -72,6 +78,9 @@ class ProjectCreate(BaseModel):
     github_repo_url: str | None = Field(default=None, max_length=2048)
     # Plain-text token supplied by the user; encrypted before storage.
     github_token: str | None = Field(default=None, max_length=1024)
+    setup_commands: list[str] = Field(default_factory=list)
+    start_command: str | None = Field(default=None, max_length=1024)
+    registered_ports: list[int] = Field(default_factory=list)
 
 
 class ProjectUpdate(BaseModel):
@@ -83,6 +92,9 @@ class ProjectUpdate(BaseModel):
     # Supplying `null` explicitly clears the stored token.
     # Omitting the field (not present in JSON) leaves the token unchanged.
     github_token: str | None = Field(default=None, max_length=1024)
+    setup_commands: list[str] | None = Field(default=None)
+    start_command: str | None = Field(default=None, max_length=1024)
+    registered_ports: list[int] | None = Field(default=None)
 
     @field_validator("name")
     @classmethod

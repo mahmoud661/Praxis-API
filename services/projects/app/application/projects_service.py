@@ -79,6 +79,9 @@ class ProjectsService:
         description: str | None,
         github_repo_url: str | None,
         github_token: str | None,
+        setup_commands: list[str] | None = None,
+        start_command: str | None = None,
+        registered_ports: list[int] | None = None,
     ) -> Project:
         encrypted_token: bytes | None = None
         if github_token:
@@ -91,6 +94,9 @@ class ProjectsService:
             description=description,
             github_repo_url=github_repo_url,
             github_encrypted_token=encrypted_token,
+            setup_commands=setup_commands or [],
+            start_command=start_command,
+            registered_ports=registered_ports or [],
         )
         return await self._repo.create(project)
 
