@@ -85,6 +85,7 @@ class ProjectsService:
             encrypted_token = self._encrypt_token(github_token)
 
         project = Project(
+            id=uuid.uuid4(),
             user_id=user_id,
             name=name,
             description=description,

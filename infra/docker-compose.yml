@@ -460,6 +460,8 @@ services:
       AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
       AI_AGENTS_SERVICE_URL: ${AI_AGENTS_SERVICE_URL}
       MEMORY_SERVICE_URL: ${MEMORY_SERVICE_URL:-http://memory-service:8001}
+      PROJECTS_SERVICE_URL: ${PROJECTS_SERVICE_URL:-http://projects-service:8003}
+      SANDBOX_SERVICE_URL: ${SANDBOX_SERVICE_URL:-http://sandbox-service:8004}
       # Resilience
       PROXY_CB_THRESHOLD: ${PROXY_CB_THRESHOLD:-5}
       PROXY_CB_RESET_MS: ${PROXY_CB_RESET_MS:-15000}
@@ -469,6 +471,8 @@ services:
       auth-service: { condition: service_started }
       ai-agents-service: { condition: service_started }
       memory-service: { condition: service_started }
+      projects-service: { condition: service_started }
+      sandbox-service: { condition: service_started }
     <<: *app-defaults
 
   # ============================================================
@@ -542,8 +546,8 @@ services:
       <<: *otel-env
       OTEL_SERVICE_NAME: projects-service
       DATABASE_URL: ${PROJECTS_DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres-projects:5432/praxis_projects}
-      ENCRYPTION_KEY: ${PROJECTS_ENCRYPTION_KEY:-CHANGEME32byteskeyForFernetHere=}
-      CORS_ORIGINS: ${PROJECTS_CORS_ORIGINS:-'["*"]'}
+      ENCRYPTION_KEY: ${PROJECTS_ENCRYPTION_KEY:-JcqTQRXfEG47JRv6Vwjol5BPQXpa4z_-IZF6BPw-t9Q=}
+      CORS_ORIGINS: '${PROJECTS_CORS_ORIGINS:-["*"]}'
     depends_on:
       postgres-projects: { condition: service_healthy }
     <<: *app-defaults
@@ -582,5 +586,5 @@ services:
       <<: *otel-env
       OTEL_SERVICE_NAME: sandbox-service
       E2B_API_KEY: ${E2B_API_KEY}
-      CORS_ORIGINS: ${SANDBOX_CORS_ORIGINS:-'["*"]'}
+      CORS_ORIGINS: '${SANDBOX_CORS_ORIGINS:-["*"]}'
     <<: *app-defaults

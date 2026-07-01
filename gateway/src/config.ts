@@ -36,8 +36,8 @@ const schema = z.object({
   AUTH_SERVICE_URL: z.string().url(),
   AI_AGENTS_SERVICE_URL: z.string().url(),
   MEMORY_SERVICE_URL: z.string().url().default("http://memory-service:8001"),
-  PROJECTS_SERVICE_URL: z.string().url().default("http://projects:8003"),
-  SANDBOX_SERVICE_URL: z.string().url().default("http://sandbox:8004"),
+  PROJECTS_SERVICE_URL: z.string().url().default("http://projects-service:8003"),
+  SANDBOX_SERVICE_URL: z.string().url().default("http://sandbox-service:8004"),
   // Resilience knobs
   PROXY_CB_THRESHOLD: z.coerce.number().int().positive().default(5),
   PROXY_CB_RESET_MS: z.coerce.number().int().positive().default(15000),

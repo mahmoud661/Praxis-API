@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, Response, status
 
 from ..controllers.projects_controller import ProjectsController
 from ..schemas import ProjectCreate, ProjectOut, ProjectUpdate, SandboxAssign
@@ -108,17 +108,19 @@ class ProjectsRoute(BaseRoute):
         @router.delete(
             "/{project_id}",
             status_code=status.HTTP_204_NO_CONTENT,
+            response_class=Response,
             summary="Delete project",
         )
         async def delete_project(
             project_id: uuid.UUID,
             x_user_id: str = Header(..., alias="X-User-Id"),
-        ) -> None:
+        ) -> Response:
             """Delete a project.  404 if it does not exist or is not owned
             by the authenticated user."""
             await self._ctrl.delete_project(
                 project_id=project_id, user_id=x_user_id
             )
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
 
         @router.post(
             "/{project_id}/sandbox",
