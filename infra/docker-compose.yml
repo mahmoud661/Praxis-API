@@ -53,6 +53,7 @@ volumes:
   loki_data:
   postgres_auth_data:
   postgres_agents_data:
+  postgres_projects_data:
   qdrant_data:
   ai_agents_files:
   caddy_data:
@@ -524,4 +525,62 @@ services:
       qdrant: { condition: service_healthy }
       kafka: { condition: service_healthy }
       kafka-init: { condition: service_completed_successfully }
+    <<: *app-defaults
+
+  # ============================================================
+  # Projects service: persists project metadata + credentials
+  # ============================================================
+  projects-service:
+    build:
+      context: ../services/projects
+      dockerfile: Dockerfile
+    container_name: projects-service
+    networks: [backend_platform]
+    ports:
+      - "${PROJECTS_PORT:-8003}:8003"
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: projects-service
+      DATABASE_URL: ${PROJECTS_DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres-projects:5432/praxis_projects}
+      ENCRYPTION_KEY: ${PROJECTS_ENCRYPTION_KEY:-CHANGEME32byteskeyForFernetHere=}
+      CORS_ORIGINS: ${PROJECTS_CORS_ORIGINS:-'["*"]'}
+    depends_on:
+      postgres-projects: { condition: service_healthy }
+    <<: *app-defaults
+
+  postgres-projects:
+    image: postgres:16-alpine
+    container_name: postgres-projects
+    networks: [backend_platform]
+    ports:
+      - "${PROJECTS_DB_PORT:-5435}:5432"
+    environment:
+      POSTGRES_USER: ${PROJECTS_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${PROJECTS_DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${PROJECTS_DB_NAME:-praxis_projects}
+    volumes:
+      - postgres_projects_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PROJECTS_DB_USER:-postgres} -d ${PROJECTS_DB_NAME:-praxis_projects}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    <<: *platform-defaults
+
+  # ============================================================
+  # Sandbox service: E2B-backed project execution environments
+  # ============================================================
+  sandbox-service:
+    build:
+      context: ../services/sandbox
+      dockerfile: Dockerfile
+    container_name: sandbox-service
+    networks: [backend_platform]
+    ports:
+      - "${SANDBOX_PORT:-8004}:8004"
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: sandbox-service
+      E2B_API_KEY: ${E2B_API_KEY}
+      CORS_ORIGINS: ${SANDBOX_CORS_ORIGINS:-'["*"]'}
     <<: *app-defaults
