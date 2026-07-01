@@ -11,6 +11,7 @@ from .memory_tools import (
     make_memory_store_tool,
     make_memory_update_tool,
 )
+from .project_tools import make_project_tools
 
 __all__ = [
     "make_kb_search_tool",
@@ -20,4 +21,5 @@ __all__ = [
     "make_memory_search_tool",
     "make_memory_store_tool",
     "make_memory_update_tool",
+    "make_project_tools",
 ]

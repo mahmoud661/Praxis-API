@@ -77,7 +77,11 @@ class ThreadsService:
         self._memory = memory_client
 
     async def create(
-        self, *, owner_id: str, title: str | None = None
+        self,
+        *,
+        owner_id: str,
+        title: str | None = None,
+        project_id: str | None = None,
     ) -> ThreadView:
         now = _now_iso()
         thread = ThreadView(
@@ -86,6 +90,13 @@ class ThreadsService:
             title=(title or "New conversation"),
             created_at=now,
             updated_at=now,
+            # Link to a project when provided so the runner can prime the
+            # first turn with the project's repo/sandbox context.
+            config=(
+                ThreadConfigView(project_id=project_id)
+                if project_id
+                else ThreadConfigView()
+            ),
         )
         await self._repo.upsert(thread)
         # Register the conversation node directly in the knowledge graph.
@@ -305,6 +316,11 @@ class ThreadsService:
             title=final_title,
             created_at=thread.created_at,
             updated_at=_now_iso(),
+            # Preserve the existing config — omitting it here would reset
+            # the block to defaults and silently drop the thread's
+            # project_id / agent_id / tool_overrides when the auto-titler
+            # re-upserts after the first turn.
+            config=thread.config,
         )
         try:
             await self._repo.upsert(updated)

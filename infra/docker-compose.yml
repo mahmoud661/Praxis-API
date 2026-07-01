@@ -574,6 +574,18 @@ services:
   # ============================================================
   # Sandbox service: E2B-backed project execution environments
   # ============================================================
+  # Builds the local sandbox desktop base image and exits (kafka-init
+  # pattern). sandbox-service launches sandbox containers FROM this image,
+  # so it must exist on the daemon before the first `create`.
+  sandbox-desktop-image:
+    build:
+      context: ../services/sandbox
+      dockerfile: desktop.Dockerfile
+    image: praxis-sandbox-desktop:local
+    command: ["true"]
+    restart: "no"
+    networks: [backend_platform]
+
   sandbox-service:
     build:
       context: ../services/sandbox
@@ -585,6 +597,24 @@ services:
     environment:
       <<: *otel-env
       OTEL_SERVICE_NAME: sandbox-service
-      E2B_API_KEY: ${E2B_API_KEY}
+      # Sandbox backend. "local" (default) runs each sandbox as a Docker
+      # container on the host daemon — no account/key needed. Set to "e2b"
+      # (plus E2B_API_KEY) to use E2B cloud desktop sandboxes instead.
+      SANDBOX_PROVIDER: ${SANDBOX_PROVIDER:-local}
+      LOCAL_SANDBOX_IMAGE: ${LOCAL_SANDBOX_IMAGE:-praxis-sandbox-desktop:local}
+      # "" = default runc. Set to "sysbox-runc" (once Sysbox is installed on
+      # the host) to give each sandbox unprivileged nested-Docker capability.
+      SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-}
+      E2B_API_KEY: ${E2B_API_KEY:-}
       CORS_ORIGINS: '${SANDBOX_CORS_ORIGINS:-["*"]}'
+    # LOCAL provider only: the service talks to the host Docker daemon to
+    # spawn sibling sandbox containers, so it needs the socket mounted and
+    # must run as root to access it. DEV-ONLY — this is root-on-host access;
+    # do not enable the local provider on a shared/prod host.
+    user: root
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      sandbox-desktop-image:
+        condition: service_completed_successfully
     <<: *app-defaults

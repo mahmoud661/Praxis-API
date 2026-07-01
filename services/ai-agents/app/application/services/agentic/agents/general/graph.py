@@ -83,6 +83,7 @@ from .tools import (
     make_memory_search_tool,
     make_memory_store_tool,
     make_memory_update_tool,
+    make_project_tools,
 )
 
 if TYPE_CHECKING:
@@ -151,6 +152,12 @@ def build_graph(
         make_memory_graph_search_tool(memory_client=memory_client),
         make_memory_list_tool(memory_client=memory_client),
         make_memory_update_tool(memory_client=memory_client),
+        # Project sandbox tools (run_command / read+write files / list /
+        # stream url). Available on every thread, but only actionable when
+        # the agent has a sandbox_id — which it only learns from a
+        # project-linked thread's primed context (see AgentRunner). In a
+        # normal chat the model has no sandbox_id and won't call them.
+        *make_project_tools(sandbox_service_url=env.sandbox_service_url),
     ]
 
     section_flow = SectionFlowMiddleware(

@@ -41,9 +41,11 @@ class SandboxService:
     # ISandboxService implementation
     # ------------------------------------------------------------------
 
-    async def create_sandbox(self, timeout_secs: int | None = None) -> SandboxInfo:
+    async def create_sandbox(
+        self, timeout_secs: int | None = None, project_id: str | None = None
+    ) -> SandboxInfo:
         secs = timeout_secs if timeout_secs is not None else self._default_timeout
-        return await self._client.create(secs)
+        return await self._client.create(secs, project_id=project_id)
 
     async def resume_sandbox(self, sandbox_id: str) -> SandboxInfo:
         async with self._lock(sandbox_id):

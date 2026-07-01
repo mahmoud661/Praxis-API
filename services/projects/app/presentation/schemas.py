@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +83,18 @@ class ProjectUpdate(BaseModel):
     # Supplying `null` explicitly clears the stored token.
     # Omitting the field (not present in JSON) leaves the token unchanged.
     github_token: str | None = Field(default=None, max_length=1024)
+
+    @field_validator("name")
+    @classmethod
+    def _reject_explicit_null_name(cls, v: str | None) -> str | None:
+        # `name` is NOT NULL in the database. Omitting it (field unset) leaves
+        # the current value untouched, but an *explicit* `"name": null` would
+        # otherwise reach the DB and raise IntegrityError -> 500. Reject it as
+        # a 422 here. Validators don't run on unset defaults, so this only
+        # fires when the caller actually sends `null`.
+        if v is None:
+            raise ValueError("name cannot be null; omit the field to leave it unchanged")
+        return v
 
 
 class SandboxAssign(BaseModel):

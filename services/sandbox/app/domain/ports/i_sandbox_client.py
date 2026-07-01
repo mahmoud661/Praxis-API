@@ -24,8 +24,14 @@ class ISandboxClient(Protocol):
     wrapping synchronous SDK calls in run_in_executor.
     """
 
-    async def create(self, timeout_secs: int) -> SandboxInfo:
-        """Provision a new sandbox and return its ID + VNC stream URL."""
+    async def create(
+        self, timeout_secs: int, project_id: str | None = None
+    ) -> SandboxInfo:
+        """Provision a new sandbox and return its ID + VNC stream URL.
+
+        `project_id`, when set, lets a provider attach persistent per-project
+        storage (the local Docker driver mounts a named volume at /workspace);
+        providers with their own persistence may ignore it."""
         ...
 
     async def resume(self, sandbox_id: str) -> SandboxInfo:
@@ -57,5 +63,10 @@ class ISandboxClient(Protocol):
         ...
 
     async def get_stream_url(self, sandbox_id: str) -> str:
-        """Return the HTTP(S) VNC stream URL for the given sandbox."""
+        """Return the VNC stream target for the given sandbox.
+
+        The route relays the browser's WebSocket to it. Two shapes:
+          - `http(s)://…` (E2B) — proxied as a WebSocket.
+          - `vnc://host:port` (local Docker) — relayed WS↔raw TCP to the
+            container's x11vnc server."""
         ...

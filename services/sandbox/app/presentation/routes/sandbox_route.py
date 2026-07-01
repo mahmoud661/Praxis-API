@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 
 import websockets
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
@@ -11,6 +12,7 @@ from ..schemas import (
     CommandResultResponse,
     CreateSandboxRequest,
     ExecCommandRequest,
+    FileTreeResponse,
     ListFilesResponse,
     MessageResponse,
     ReadFileResponse,
@@ -22,6 +24,125 @@ from ..schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sandbox"])
+
+
+async def _relay_vnc_tcp(websocket: WebSocket, target: str) -> None:
+    """Relay the browser WebSocket to a raw VNC TCP endpoint (local Docker
+    provider). `target` is `vnc://host:port` — the sandbox container's
+    x11vnc server. This is exactly what websockify does: browser noVNC
+    speaks the RFB protocol as binary WS frames; we pipe those bytes to the
+    VNC TCP socket and back. Bidirectional; first side to end cancels the
+    other."""
+    rest = target[len("vnc://") :]
+    host, _, port_s = rest.partition(":")
+    port = int(port_s or 5900)
+
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+    except Exception:
+        logger.exception("sandbox.stream.vnc_connect_failed", extra={"target": target})
+        await websocket.close(code=4500, reason="VNC connect failed.")
+        return
+
+    async def ws_to_tcp() -> None:
+        async for chunk in websocket.iter_bytes():
+            writer.write(chunk)
+            await writer.drain()
+
+    async def tcp_to_ws() -> None:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            await websocket.send_bytes(data)
+
+    try:
+        done, pending = await asyncio.wait(
+            [asyncio.ensure_future(ws_to_tcp()), asyncio.ensure_future(tcp_to_ws())],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("sandbox.stream.vnc_relay_error", extra={"target": target})
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+# Directories excluded from the file tree — huge / noise. They still show up
+# as folder nodes; we just don't descend into them.
+_TREE_PRUNE = (
+    "node_modules", ".git", ".venv", "venv", "__pycache__",
+    "dist", "build", ".next", ".cache", ".mypy_cache", ".pytest_cache",
+)
+_TREE_MAXDEPTH = 8
+_TREE_MAX_ENTRIES = 4000
+
+
+def _tree_find_cmd(path: str) -> str:
+    """A single `find` that lists the workspace as `<type>\\t<relpath>` lines,
+    pruning heavy dirs and bounding depth + count. GNU find only (`-printf`)."""
+    q = shlex.quote(path)
+    names = " -o ".join(f"-name {shlex.quote(n)}" for n in _TREE_PRUNE)
+    return (
+        f"find {q} -mindepth 1 -maxdepth {_TREE_MAXDEPTH} "
+        f"\\( {names} \\) -prune -printf '%y\\t%P\\n' "
+        f"-o -printf '%y\\t%P\\n' 2>/dev/null | head -n {_TREE_MAX_ENTRIES}"
+    )
+
+
+def _build_tree(stdout: str) -> list[dict]:
+    """Turn the flat `<type>\\t<relpath>` listing into a nested tree
+    (folders-first, alphabetical). Shape matches the frontend Magic UI
+    `TreeViewElement` (id/name/type/children)."""
+    entries: list[tuple[str, str]] = []
+    for line in stdout.splitlines():
+        if "\t" not in line:
+            continue
+        typ, rel = line.split("\t", 1)
+        if rel:
+            entries.append((typ, rel))
+    # Shallower paths first so a parent always exists before its children.
+    entries.sort(key=lambda e: e[1].count("/"))
+
+    nodes: dict[str, dict] = {}
+    roots: list[dict] = []
+    for typ, rel in entries:
+        parts = rel.split("/")
+        is_dir = typ == "d"
+        node: dict = {
+            "id": rel,
+            "name": parts[-1],
+            "type": "folder" if is_dir else "file",
+            "children": [] if is_dir else None,
+        }
+        nodes[rel] = node
+        parent = "/".join(parts[:-1])
+        bucket = roots
+        if parent:
+            p = nodes.get(parent)
+            if p is not None and p.get("children") is not None:
+                bucket = p["children"]
+        bucket.append(node)
+
+    def _sort(level: list[dict]) -> None:
+        level.sort(key=lambda n: (n["type"] != "folder", n["name"].lower()))
+        for n in level:
+            if n.get("children"):
+                _sort(n["children"])
+
+    _sort(roots)
+    return roots
 
 
 def _make_router(service: SandboxService) -> APIRouter:
@@ -37,9 +158,11 @@ def _make_router(service: SandboxService) -> APIRouter:
 
     @router.post("/sandbox", response_model=SandboxResponse, status_code=status.HTTP_201_CREATED)
     async def create_sandbox(body: CreateSandboxRequest = CreateSandboxRequest()) -> SandboxResponse:
-        """Provision a new E2B Desktop sandbox."""
+        """Provision a new sandbox (mounts the project volume when project_id is set)."""
         try:
-            info = await service.create_sandbox(timeout_secs=body.timeout_secs)
+            info = await service.create_sandbox(
+                timeout_secs=body.timeout_secs, project_id=body.project_id
+            )
         except Exception as exc:
             logger.exception("sandbox.create.failed")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -153,6 +276,24 @@ def _make_router(service: SandboxService) -> APIRouter:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return ListFilesResponse(files=files)
 
+    # ── File tree ─────────────────────────────────────────────────────────────
+
+    @router.get("/sandbox/{sandbox_id}/files/tree", response_model=FileTreeResponse)
+    async def files_tree(
+        sandbox_id: str,
+        path: str = Query("/workspace", description="Root directory to walk."),
+    ) -> FileTreeResponse:
+        """Return the workspace as a nested folder/file tree (heavy dirs
+        pruned, depth + count bounded). Backs the workspace Files tab."""
+        try:
+            result = await service.exec_command(sandbox_id, _tree_find_cmd(path))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("sandbox.files_tree.failed", extra={"sandbox_id": sandbox_id})
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return FileTreeResponse(tree=_build_tree(result.stdout))
+
     # ── Stream URL ────────────────────────────────────────────────────────────
 
     @router.get("/sandbox/{sandbox_id}/stream-url", response_model=StreamUrlResponse)
@@ -181,7 +322,11 @@ def _make_router(service: SandboxService) -> APIRouter:
         either side disconnected) cancels the other so no zombie coroutines
         are left behind.
         """
-        await websocket.accept()
+        # noVNC negotiates the "binary" subprotocol — echo it back when
+        # offered so the RFB client is happy; otherwise accept plainly.
+        offered = websocket.scope.get("subprotocols") or []
+        subprotocol = "binary" if "binary" in offered else None
+        await websocket.accept(subprotocol=subprotocol)
 
         try:
             stream_url = await service.get_stream_url(sandbox_id)
@@ -191,6 +336,11 @@ def _make_router(service: SandboxService) -> APIRouter:
         except Exception:
             logger.exception("sandbox.stream.get_url_failed", extra={"sandbox_id": sandbox_id})
             await websocket.close(code=4500, reason="Internal error.")
+            return
+
+        # Local provider: `vnc://host:port` → relay WS ↔ raw VNC TCP.
+        if stream_url.startswith("vnc://"):
+            await _relay_vnc_tcp(websocket, stream_url)
             return
 
         # E2B returns an HTTP(S) URL; convert to WS(S) for the websockets library.

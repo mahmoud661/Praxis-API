@@ -11,8 +11,32 @@ class Env(BaseSettings):
     service_host: str = "0.0.0.0"
     service_port: int = 8004
 
-    # E2B credentials — required; fail loudly at boot if absent.
-    e2b_api_key: str
+    # Sandbox backend: "local" (Docker containers on the host daemon, no
+    # account needed) or "e2b" (E2B cloud desktop sandboxes). Defaults to
+    # "local" so the stack runs end-to-end with zero external credentials.
+    sandbox_provider: str = "local"
+
+    # E2B credentials — only required when sandbox_provider == "e2b".
+    # Optional otherwise so the service boots for local Docker sandboxes.
+    e2b_api_key: str = ""
+
+    # Local provider: the base image each sandbox container runs. The
+    # default (built by the `sandbox-desktop-image` compose service) bundles
+    # a minimal X stack so the Sandbox tab shows a live screenshot desktop.
+    # Any image with a POSIX shell works for command/file execution; the
+    # desktop stream additionally needs Xvfb + imagemagick + xdotool.
+    local_sandbox_image: str = "praxis-sandbox-desktop:local"
+
+    # Path to the Docker daemon socket, mounted into this container. The
+    # local provider talks to the Engine API over it.
+    docker_socket: str = "/var/run/docker.sock"
+
+    # Container runtime for sandboxes. "" = Docker's default (runc). Set to
+    # "sysbox-runc" to run each sandbox UNPRIVILEGED yet Docker-capable via
+    # Sysbox — so the sandbox can run nested `docker`/`docker compose`
+    # without host access. Requires the Sysbox runtime installed on the host
+    # and registered in Docker (`docker info` lists sysbox-runc).
+    sandbox_runtime: str = ""
 
     # CORS — allow all by default (gateway enforces auth upstream).
     cors_origins: list[str] = ["*"]

@@ -28,6 +28,7 @@ class ThreadConfigResponse(BaseModel):
     agent_id: str | None = None
     tool_overrides: dict[str, bool] = Field(default_factory=dict)
     custom_system_prompt_id: str | None = None
+    project_id: str | None = None
 
     @classmethod
     def from_view(cls, c: ThreadConfigView) -> "ThreadConfigResponse":
@@ -35,6 +36,7 @@ class ThreadConfigResponse(BaseModel):
             agent_id=c.agent_id,
             tool_overrides=dict(c.tool_overrides),
             custom_system_prompt_id=c.custom_system_prompt_id,
+            project_id=c.project_id,
         )
 
 
@@ -74,6 +76,9 @@ class ThreadListResponse(BaseModel):
 class CreateThreadBody(BaseModel):
     # Optional — defaults to "New conversation" service-side.
     title: str | None = Field(default=None, max_length=120)
+    # Optional — links the thread to a project so the agent runs with that
+    # project's repo/sandbox context. Omitted for normal standalone chats.
+    project_id: str | None = Field(default=None, max_length=64)
 
 
 class HistoryToolCallResponse(BaseModel):
@@ -142,7 +147,9 @@ class ThreadsController:
         body: CreateThreadBody,
         user_id: str = Depends(current_user_id),
     ) -> ThreadResponse:
-        thread = await self._service.create(owner_id=user_id, title=body.title)
+        thread = await self._service.create(
+            owner_id=user_id, title=body.title, project_id=body.project_id
+        )
         return ThreadResponse.from_view(thread)
 
     async def get_thread(

@@ -17,9 +17,22 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from ...application.sandbox_service import SandboxService
+from ...domain.ports.i_sandbox_client import ISandboxClient
 from ...infrastructure.config.env import Env, load_env
-from ...infrastructure.e2b.e2b_client import E2BSandboxClient
 from ..routes.sandbox_route import _make_router
+
+
+def _build_client(env: Env) -> ISandboxClient:
+    """Pick the sandbox driver from config. Imports are lazy so the E2B
+    SDK isn't loaded (nor its api-key requirement felt) when running the
+    local provider, and vice versa."""
+    if env.sandbox_provider == "e2b":
+        from ...infrastructure.e2b.e2b_client import E2BSandboxClient
+
+        return E2BSandboxClient(env)
+    from ...infrastructure.local.local_docker_client import LocalDockerSandboxClient
+
+    return LocalDockerSandboxClient(env)
 
 
 class Container:
@@ -27,7 +40,7 @@ class Container:
 
     def __init__(self) -> None:
         self._env: Env = load_env()
-        self._client: E2BSandboxClient = E2BSandboxClient(self._env)
+        self._client: ISandboxClient = _build_client(self._env)
         self._service: SandboxService = SandboxService(self._client, self._env)
 
     @property

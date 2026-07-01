@@ -40,7 +40,7 @@ class FakeMemoryStore:
         return episode.id
 
     async def search(
-        self, *, owner_id: str, query: str, k: int = 10
+        self, *, owner_id: str, query: str, k: int = 10, source_filter: str | None = None
     ) -> list[MemorySearchHit]:
         return list(self._injected_hits[:k])
 

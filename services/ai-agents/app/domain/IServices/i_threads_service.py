@@ -13,9 +13,17 @@ from ..dtos.thread_dto import (
 
 
 class IThreadsService(Protocol):
-    async def create(self, *, owner_id: str, title: str | None = None) -> ThreadView:
+    async def create(
+        self,
+        *,
+        owner_id: str,
+        title: str | None = None,
+        project_id: str | None = None,
+    ) -> ThreadView:
         """Provision a new thread owned by `owner_id`. Title defaults to a
-        placeholder that `maybe_generate_title` later overwrites."""
+        placeholder that `maybe_generate_title` later overwrites.
+        `project_id`, when set, links the thread to a project so the runner
+        primes the agent's first turn with that project's context."""
 
     async def list_for_owner(self, owner_id: str) -> list[ThreadView]:
         """Every thread the owner can see, newest-first."""

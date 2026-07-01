@@ -25,7 +25,7 @@ function main(): void {
 
   const resolver = new RedisSessionResolver(redis, config.SESSION_TTL_SECONDS);
 
-  const { app, wsProxy } = buildApp({ config, resolver, redis, logger });
+  const { app, wsProxy, sandboxWsProxy } = buildApp({ config, resolver, redis, logger });
   const server = app.listen(config.PORT, () => {
     logger.info("gateway listening", { port: config.PORT });
   });
@@ -73,7 +73,14 @@ function main(): void {
       // at runtime it's always a net.Socket — that's what the HTTP server
       // hands us. http-proxy-middleware's `.upgrade` is typed `socket: Socket`
       // so we narrow.
-      wsProxy.upgrade?.(req, socket as import("net").Socket, head);
+      const netSocket = socket as import("net").Socket;
+      // Route to the right upstream: sandbox stream vs ai-agents chat/notif.
+      // Both proxies live under /v1/ws/*; the path prefix disambiguates.
+      if (req.url.startsWith("/v1/ws/sandbox")) {
+        sandboxWsProxy.upgrade?.(req, netSocket, head);
+      } else {
+        wsProxy.upgrade?.(req, netSocket, head);
+      }
     } catch (err) {
       logger.error("ws.upgrade.failed", {
         err: err instanceof Error ? err.message : String(err),

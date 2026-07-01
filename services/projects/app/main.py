@@ -3,7 +3,6 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 # OpenTelemetry is loaded via the `opentelemetry-instrument` CLI wrapper
 # in the Dockerfile, so no tracing setup here.
@@ -13,7 +12,6 @@ from .presentation.di.container import mount_routes, register_dependencies
 def create_app() -> FastAPI:
     container = register_dependencies()
     logger = container.resolve("Logger")
-    settings = container.resolve("Settings")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -40,15 +38,12 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="projects-service", lifespan=lifespan)
 
-    # CORS — origins come from settings so the compose / k8s overlay can
-    # lock them down for production without touching the source.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # NOTE: No CORS middleware here. This service is internal-only — the
+    # gateway is the single CORS authority and terminates all browser CORS.
+    # A downstream CORSMiddleware with allow_origins=["*"] emits
+    # `Access-Control-Allow-Origin: *`, which the proxy pipes over the
+    # gateway's per-origin header; combined with credentialed requests the
+    # browser rejects it. Matches ai-agents / memory (neither adds CORS).
 
     mount_routes(app, container)
     return app

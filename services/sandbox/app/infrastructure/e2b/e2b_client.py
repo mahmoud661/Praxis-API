@@ -50,23 +50,42 @@ class E2BSandboxClient:
     # ISandboxClient implementation
     # ------------------------------------------------------------------
 
-    async def create(self, timeout_secs: int) -> SandboxInfo:
-        def _create():
-            sbx = Sandbox(api_key=self._api_key, timeout=timeout_secs)
-            return sbx
+    def _stream_url(self, sbx: Sandbox) -> str:
+        """Start the VNC server (idempotent) and return its stream URL.
+
+        `stream` is a property on the 2.x SDK; the VNC server must be
+        started before `get_url()` works. `start()` raises if it's already
+        running, so a second call (e.g. a later get_stream_url) is treated
+        as a no-op."""
+        try:
+            sbx.stream.start()
+        except Exception:  # noqa: BLE001 — already started; url still valid
+            pass
+        return sbx.stream.get_url()
+
+    async def create(
+        self, timeout_secs: int, project_id: str | None = None
+    ) -> SandboxInfo:
+        # e2b-desktop 2.x: `Sandbox.create(...)` is the factory (the old
+        # `Sandbox(api_key=...)` constructor no longer accepts api_key).
+        # `project_id` is ignored — E2B manages its own persistence.
+        def _create() -> Sandbox:
+            return Sandbox.create(timeout=timeout_secs, api_key=self._api_key)
 
         sbx: Sandbox = await self._run(_create)
         self._active_sandboxes[sbx.sandbox_id] = sbx
-        stream_url: str = await self._run(sbx.get_video_url)
+        stream_url: str = await self._run(self._stream_url, sbx)
         return SandboxInfo(sandbox_id=sbx.sandbox_id, stream_url=stream_url)
 
     async def resume(self, sandbox_id: str) -> SandboxInfo:
-        def _resume():
-            return Sandbox.resume(sandbox_id, api_key=self._api_key)
+        # 2.x replaced `Sandbox.resume(id)` with `Sandbox.connect(id)`,
+        # which reconnects to a running sandbox (auto-resuming a paused one).
+        def _resume() -> Sandbox:
+            return Sandbox.connect(sandbox_id, api_key=self._api_key)
 
         sbx: Sandbox = await self._run(_resume)
         self._active_sandboxes[sandbox_id] = sbx
-        stream_url: str = await self._run(sbx.get_video_url)
+        stream_url: str = await self._run(self._stream_url, sbx)
         return SandboxInfo(sandbox_id=sandbox_id, stream_url=stream_url)
 
     async def pause(self, sandbox_id: str) -> None:
@@ -90,22 +109,23 @@ class E2BSandboxClient:
 
     async def write_file(self, sandbox_id: str, path: str, content: str) -> None:
         sbx = self._get(sandbox_id)
-        await self._run(sbx.filesystem.write, path, content)
+        # 2.x: the filesystem API moved from `.filesystem` to `.files`.
+        await self._run(sbx.files.write, path, content)
 
     async def read_file(self, sandbox_id: str, path: str) -> str:
         sbx = self._get(sandbox_id)
-        return await self._run(sbx.filesystem.read, path)
+        return await self._run(sbx.files.read, path)
 
     async def list_files(self, sandbox_id: str, path: str) -> list[str]:
         sbx = self._get(sandbox_id)
-        entries = await self._run(sbx.filesystem.list, path)
-        # FileInfo objects expose a `.name` attribute; fall back to str()
+        entries = await self._run(sbx.files.list, path)
+        # EntryInfo objects expose a `.name` attribute; fall back to str()
         # if the SDK ever changes the return type.
         return [getattr(e, "name", str(e)) for e in entries]
 
     async def get_stream_url(self, sandbox_id: str) -> str:
         sbx = self._get(sandbox_id)
-        return await self._run(sbx.get_video_url)
+        return await self._run(self._stream_url, sbx)
 
 
 # Satisfy the structural Protocol check at import time (no runtime overhead).

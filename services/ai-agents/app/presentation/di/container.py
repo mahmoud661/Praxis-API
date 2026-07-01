@@ -40,6 +40,7 @@ from ...infrastructure.cache.event_stream import EventStream
 from ...infrastructure.config.env import load_env
 from ...infrastructure.documents.document_extractor import DocumentExtractor
 from ...infrastructure.memory.http_memory_client import HttpMemoryClient
+from ...infrastructure.projects.http_projects_client import HttpProjectsClient
 from ...infrastructure.files.file_storage import (
     IFileStorage,
     InMemoryFileStorage,
@@ -264,6 +265,11 @@ def register_dependencies() -> Container:
     # resolve `IMemoryClient` from its constructor annotation.
     container.register("IMemoryClient", HttpMemoryClient(env))
 
+    # Projects client — HTTP adapter calling the projects service REST API.
+    # The runner uses it to fetch a linked project's context (repo/sandbox)
+    # when priming the first turn of a project thread.
+    container.register("IProjectsClient", HttpProjectsClient(env))
+
     # Pre-register KnowledgeService + FilesService manually so the
     # AgentRunner construction below can resolve IFilesService. The
     # alphabetical auto_register globber would build FilesService BEFORE
@@ -298,6 +304,8 @@ def register_dependencies() -> Container:
             registry,
             container.resolve("IFilesService"),
             container.resolve("IMemoryClient"),
+            container.resolve("IProjectsClient"),
+            container.resolve("IThreadRepo"),
             logger,
         ),
     )

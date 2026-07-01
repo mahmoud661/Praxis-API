@@ -189,3 +189,23 @@ async def test_assign_sandbox(service: ProjectsService) -> None:
     project = await service.create_project("u1", "P", None, None, None)
     updated = await service.assign_sandbox(project.id, "u1", "sandbox-abc")
     assert updated.sandbox_id == "sandbox-abc"
+
+
+def test_update_schema_rejects_explicit_null_name() -> None:
+    """`{"name": null}` must fail validation (422) rather than reaching the
+    NOT NULL column and raising a 500 IntegrityError."""
+    import pydantic
+
+    from app.presentation.schemas import ProjectUpdate
+
+    with pytest.raises(pydantic.ValidationError):
+        ProjectUpdate(name=None)
+
+
+def test_update_schema_allows_omitted_name() -> None:
+    """Omitting `name` is valid (partial update) and stays unset so it is not
+    applied over the existing value."""
+    from app.presentation.schemas import ProjectUpdate
+
+    update = ProjectUpdate(description="new desc")
+    assert "name" not in update.model_dump(exclude_unset=True)
