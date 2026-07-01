@@ -127,6 +127,20 @@ class E2BSandboxClient:
         sbx = self._get(sandbox_id)
         return await self._run(self._stream_url, sbx)
 
+    async def internal_host(self, sandbox_id: str) -> str:
+        # E2B exposes ports via its own public host URLs, not a routable IP
+        # on our network — the local preview proxy path doesn't apply here.
+        raise NotImplementedError(
+            "Port preview is not supported for the E2B provider."
+        )
+
+    async def open_terminal(self, sandbox_id: str, *, cols: int, rows: int):
+        # E2B Desktop has no raw PTY hijack in this adapter; the browser
+        # terminal is a local-provider feature.
+        raise NotImplementedError(
+            "Interactive terminal is not supported for the E2B provider."
+        )
+
 
 # Satisfy the structural Protocol check at import time (no runtime overhead).
 _: ISandboxClient = E2BSandboxClient.__new__(E2BSandboxClient)  # type: ignore[assignment]

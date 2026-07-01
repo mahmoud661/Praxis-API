@@ -81,3 +81,13 @@ class SandboxService:
         # Read-only; still serialised so the handle lookup is consistent.
         async with self._lock(sandbox_id):
             return await self._client.get_stream_url(sandbox_id)
+
+    async def internal_host(self, sandbox_id: str) -> str:
+        # Reachable host for the preview reverse-proxy. Not lock-serialised
+        # so proxied traffic doesn't contend with exec/file operations.
+        return await self._client.internal_host(sandbox_id)
+
+    async def open_terminal(self, sandbox_id: str, *, cols: int, rows: int):
+        # Long-lived interactive shell. NOT lock-serialised — it must not
+        # block exec/file ops for the session's whole lifetime.
+        return await self._client.open_terminal(sandbox_id, cols=cols, rows=rows)

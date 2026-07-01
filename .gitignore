@@ -107,3 +107,7 @@ caddy_config/
 # Frontend builds (in case someone copies a frontend `dist/` here by mistake).
 .next/
 out/
+
+# ---- Local dev artifacts -------------------------------------------------
+# Sysbox installer package pulled for local sandbox runtime; not part of the repo.
+sysbox-ce_*.deb

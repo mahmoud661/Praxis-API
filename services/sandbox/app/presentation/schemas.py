@@ -80,6 +80,13 @@ class StreamUrlResponse(BaseModel):
     url: str
 
 
+class PortsResponse(BaseModel):
+    """Ports the sandbox is currently listening on (0.0.0.0/::) — i.e. the
+    ones reachable by the preview proxy."""
+
+    ports: list[int]
+
+
 class MessageResponse(BaseModel):
     """Generic acknowledgement envelope."""
     message: str

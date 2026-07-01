@@ -17,12 +17,41 @@ class CommandResult:
     exit_code: int
 
 
+class PtySession(Protocol):
+    """A live interactive shell (PTY) inside a sandbox. Bytes flow both
+    ways; the route relays them to/from a WebSocket. Tty is enabled, so the
+    stream is raw (not multiplexed)."""
+
+    async def read(self) -> bytes:
+        """Read a chunk of terminal output. Returns b"" at EOF (shell exit)."""
+        ...
+
+    async def write(self, data: bytes) -> None:
+        """Write keystrokes to the shell's stdin."""
+        ...
+
+    async def resize(self, cols: int, rows: int) -> None:
+        """Resize the PTY so full-screen programs (vim, htop) render right."""
+        ...
+
+    async def close(self) -> None:
+        """Tear down the shell + connection."""
+        ...
+
+
 class ISandboxClient(Protocol):
     """Port for the E2B Desktop sandbox driver.
 
     All methods are async; concrete adapters are responsible for
     wrapping synchronous SDK calls in run_in_executor.
     """
+
+    async def open_terminal(
+        self, sandbox_id: str, *, cols: int, rows: int
+    ) -> "PtySession":
+        """Open an interactive shell (PTY) in the sandbox. Providers without a
+        PTY raise NotImplementedError."""
+        ...
 
     async def create(
         self, timeout_secs: int, project_id: str | None = None
@@ -60,6 +89,14 @@ class ISandboxClient(Protocol):
 
     async def list_files(self, sandbox_id: str, path: str) -> list[str]:
         """Return a list of file/directory names under `path`."""
+        ...
+
+    async def internal_host(self, sandbox_id: str) -> str:
+        """Return the host (IP or hostname) at which the sandbox's own
+        published ports are reachable from this service — used by the
+        preview reverse-proxy. Local Docker returns the container IP on the
+        shared network; providers without a routable host raise
+        NotImplementedError."""
         ...
 
     async def get_stream_url(self, sandbox_id: str) -> str:

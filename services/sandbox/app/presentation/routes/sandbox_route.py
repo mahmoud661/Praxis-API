@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shlex
 
+import httpx
 import websockets
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 
 from ...application.sandbox_service import SandboxService
 from ..schemas import (
@@ -15,11 +26,41 @@ from ..schemas import (
     FileTreeResponse,
     ListFilesResponse,
     MessageResponse,
+    PortsResponse,
     ReadFileResponse,
     SandboxResponse,
     StreamUrlResponse,
     WriteFileRequest,
 )
+
+# Hop-by-hop headers not forwarded through the preview reverse-proxy.
+_HOP_BY_HOP = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+}
+
+
+def _parse_listening_ports(procnet: str) -> list[int]:
+    """Parse `/proc/net/tcp{,6}` and return TCP ports in LISTEN state bound to
+    all interfaces (0.0.0.0 / ::) — those the preview proxy can reach.
+    Loopback-only binds are skipped (unreachable from this service)."""
+    ports: set[int] = set()
+    for line in procnet.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        local, state = parts[1], parts[3]
+        if state != "0A" or ":" not in local:  # 0A = TCP_LISTEN
+            continue
+        ip_hex, _, port_hex = local.rpartition(":")
+        if set(ip_hex) != {"0"}:  # only all-interfaces binds are reachable
+            continue
+        try:
+            ports.add(int(port_hex, 16))
+        except ValueError:
+            continue
+    ports.discard(5900)  # x11vnc — internal, not a user app
+    return sorted(ports)
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +335,66 @@ def _make_router(service: SandboxService) -> APIRouter:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return FileTreeResponse(tree=_build_tree(result.stdout))
 
+    # ── Ports (run engine) ──────────────────────────────────────────────────────
+
+    @router.get("/sandbox/{sandbox_id}/ports", response_model=PortsResponse)
+    async def sandbox_ports(sandbox_id: str) -> PortsResponse:
+        """List the ports the sandbox is currently listening on (reachable
+        binds), so the UI can offer Preview/open. Reads /proc/net so it needs
+        no extra tools in the image."""
+        try:
+            result = await service.exec_command(
+                sandbox_id, "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null"
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("sandbox.ports.failed", extra={"sandbox_id": sandbox_id})
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return PortsResponse(ports=_parse_listening_ports(result.stdout))
+
+    # ── Preview reverse-proxy ────────────────────────────────────────────────────
+
+    @router.api_route(
+        "/sandbox/{sandbox_id}/proxy/{port}/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    )
+    async def sandbox_proxy(
+        sandbox_id: str, port: int, path: str, request: Request
+    ) -> Response:
+        """Reverse-proxy an app running inside the sandbox (bound 0.0.0.0:port)
+        so the browser can reach it. Note: path-prefixed — apps that use
+        relative asset paths work best; absolute-root paths may need the
+        subdomain proxy (future)."""
+        try:
+            host = await service.internal_host(sandbox_id)
+        except ValueError:
+            return Response("Sandbox not found.", status_code=404)
+        except NotImplementedError:
+            return Response("Preview is not available for this provider.", status_code=501)
+        except Exception:
+            logger.exception("sandbox.proxy.host_failed", extra={"sandbox_id": sandbox_id})
+            return Response("Internal error.", status_code=500)
+
+        target = f"http://{host}:{port}/{path}"
+        fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+        body = await request.body()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), follow_redirects=False) as client:
+                upstream = await client.request(
+                    request.method, target,
+                    params=request.query_params, headers=fwd_headers, content=body,
+                )
+        except Exception as exc:  # noqa: BLE001
+            return Response(f"Preview upstream error: {exc}", status_code=502)
+        resp_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP}
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            headers=resp_headers,
+            media_type=upstream.headers.get("content-type"),
+        )
+
     # ── Stream URL ────────────────────────────────────────────────────────────
 
     @router.get("/sandbox/{sandbox_id}/stream-url", response_model=StreamUrlResponse)
@@ -382,6 +483,94 @@ def _make_router(service: SandboxService) -> APIRouter:
             logger.exception("sandbox.stream.proxy_error", extra={"sandbox_id": sandbox_id})
         finally:
             # close() is idempotent; safe even if the client already disconnected.
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
+    # ── Interactive terminal (PTY) ──────────────────────────────────────────────
+
+    @router.websocket("/sandbox/{sandbox_id}/pty")
+    async def sandbox_pty(websocket: WebSocket, sandbox_id: str) -> None:
+        """Bridge a browser terminal (xterm.js) to a real interactive shell
+        inside the sandbox.
+
+        Wire protocol:
+          - client → server BINARY frames: raw keystrokes → the PTY's stdin.
+          - client → server TEXT frames: JSON control, currently only
+            `{"resize": {"cols": N, "rows": M}}`.
+          - server → client BINARY frames: raw PTY output.
+
+        Two relay tasks run concurrently; whichever finishes first (a side
+        disconnected or the shell exited) cancels the other."""
+        await websocket.accept()
+
+        # Initial size can be hinted via query params so the first paint fits.
+        def _int(name: str, default: int) -> int:
+            try:
+                return max(1, int(websocket.query_params.get(name, default)))
+            except (TypeError, ValueError):
+                return default
+
+        try:
+            session = await service.open_terminal(
+                sandbox_id, cols=_int("cols", 80), rows=_int("rows", 24)
+            )
+        except ValueError:
+            await websocket.close(code=4004, reason="Sandbox not found.")
+            return
+        except NotImplementedError:
+            await websocket.close(code=4501, reason="Terminal not supported.")
+            return
+        except Exception:
+            logger.exception("sandbox.pty.open_failed", extra={"sandbox_id": sandbox_id})
+            await websocket.close(code=4500, reason="Internal error.")
+            return
+
+        async def pty_to_client() -> None:
+            while True:
+                data = await session.read()
+                if not data:  # shell exited / stream closed
+                    break
+                await websocket.send_bytes(data)
+
+        async def client_to_pty() -> None:
+            while True:
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                data = msg.get("bytes")
+                if data is not None:
+                    await session.write(data)
+                    continue
+                text = msg.get("text")
+                if text:
+                    try:
+                        ctrl = json.loads(text)
+                    except ValueError:
+                        continue
+                    size = ctrl.get("resize")
+                    if isinstance(size, dict):
+                        await session.resize(
+                            int(size.get("cols", 80)), int(size.get("rows", 24))
+                        )
+
+        try:
+            done, pending = await asyncio.wait(
+                [
+                    asyncio.ensure_future(pty_to_client()),
+                    asyncio.ensure_future(client_to_pty()),
+                ],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            logger.exception("sandbox.pty.relay_error", extra={"sandbox_id": sandbox_id})
+        finally:
+            await session.close()
             try:
                 await websocket.close()
             except Exception:

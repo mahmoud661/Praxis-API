@@ -25,6 +25,7 @@ it on a shared/prod host.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import shlex
 import socket
@@ -121,6 +122,70 @@ _DOCKER_BOOT = (
 )
 
 
+# Boots the interactive shell with a real prompt. bash by default (falls back
+# to sh); a generated rcfile sources the system/user rc, drops into
+# /workspace, and sets a coloured PS1 that shows the current path — teal cwd
+# + a green ❯ — so the terminal reads like a proper shell, not a blank void.
+_SHELL_BOOT = "\n".join(
+    [
+        "cat >/tmp/praxis.rc <<'RC'",
+        "[ -f /etc/bash.bashrc ] && . /etc/bash.bashrc",
+        '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"',
+        "cd /workspace 2>/dev/null",
+        r"export PS1='\[\e[38;5;44m\]\w\[\e[0m\] \[\e[38;5;42m\]❯\[\e[0m\] '",
+        "export TERM=xterm-256color",
+        "RC",
+        # NB: don't redirect the shell's stderr — bash writes its PROMPT there.
+        "command -v bash >/dev/null 2>&1 && exec bash --rcfile /tmp/praxis.rc -i || exec sh",
+    ]
+)
+
+
+class LocalPtySession:
+    """A live interactive shell over a *hijacked* Docker exec stream.
+
+    A normal Engine-API request won't do: an interactive PTY needs the raw,
+    bidirectional connection the daemon upgrades to on `/exec/{id}/start`.
+    So we speak HTTP/1.1 directly over the docker socket, read past the
+    response head, and hand back the raw reader/writer. Tty is on, so the
+    stream is *not* multiplexed — bytes flow straight through both ways."""
+
+    def __init__(
+        self,
+        exec_id: str,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        http: httpx.AsyncClient,
+    ) -> None:
+        self._exec_id = exec_id
+        self._reader = reader
+        self._writer = writer
+        self._http = http
+
+    async def read(self) -> bytes:
+        return await self._reader.read(65536)
+
+    async def write(self, data: bytes) -> None:
+        self._writer.write(data)
+        await self._writer.drain()
+
+    async def resize(self, cols: int, rows: int) -> None:
+        # Best-effort — a failed resize must not tear down the shell.
+        try:
+            await self._http.post(
+                f"/exec/{self._exec_id}/resize", params={"h": rows, "w": cols}
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def close(self) -> None:
+        try:
+            self._writer.close()
+            await self._writer.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class LocalDockerSandboxClient:
     """Implements ISandboxClient against the local Docker Engine API."""
 
@@ -129,6 +194,9 @@ class LocalDockerSandboxClient:
         # "" → Docker default runtime (runc); "sysbox-runc" → Sysbox
         # (unprivileged nested Docker). Applied to every sandbox on create.
         self._runtime = env.sandbox_runtime
+        # Raw docker.sock path — used for the interactive-shell hijack, which
+        # httpx's normal request/response cycle can't do.
+        self._socket = env.docker_socket
         self._http = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(uds=env.docker_socket),
             base_url="http://docker",
@@ -404,6 +472,60 @@ class LocalDockerSandboxClient:
         await self._ensure_desktop(sandbox_id)
         ip = await self._container_ip(sandbox_id)
         return f"vnc://{ip}:{_VNC_PORT}"
+
+    async def internal_host(self, sandbox_id: str) -> str:
+        # The container's IP on this service's network — apps that bind
+        # 0.0.0.0:<port> inside the sandbox are reachable here at <ip>:<port>.
+        return await self._container_ip(sandbox_id)
+
+    async def open_terminal(
+        self, sandbox_id: str, *, cols: int = 80, rows: int = 24
+    ) -> LocalPtySession:
+        # Interactive login shell in the workspace. bash with a real TERM so
+        # colours + line editing work; falls back to sh if bash is absent.
+        create = await self._http.post(
+            f"/containers/{sandbox_id}/exec",
+            json={
+                "AttachStdin": True,
+                "AttachStdout": True,
+                "AttachStderr": True,
+                "Tty": True,
+                "Cmd": ["/bin/sh", "-c", _SHELL_BOOT],
+                "WorkingDir": "/workspace",
+                "Env": ["TERM=xterm-256color"],
+            },
+        )
+        if create.status_code == 404:
+            raise self._not_found(sandbox_id)
+        create.raise_for_status()
+        exec_id = create.json()["Id"]
+
+        # Hijack: open the socket ourselves and request the connection upgrade
+        # so we get the raw duplex stream instead of a buffered response.
+        reader, writer = await asyncio.open_unix_connection(self._socket)
+        body = b'{"Detach":false,"Tty":true}'
+        request = (
+            f"POST /exec/{exec_id}/start HTTP/1.1\r\n"
+            "Host: docker\r\n"
+            "Content-Type: application/json\r\n"
+            "Connection: Upgrade\r\n"
+            "Upgrade: tcp\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "\r\n"
+        ).encode() + body
+        writer.write(request)
+        await writer.drain()
+
+        # Drain the HTTP response head; everything after the blank line is
+        # the raw PTY stream.
+        while True:
+            line = await reader.readline()
+            if line in (b"\r\n", b"\n", b""):
+                break
+
+        session = LocalPtySession(exec_id, reader, writer, self._http)
+        await session.resize(cols, rows)
+        return session
 
 
 # Structural Protocol check at import time (no runtime overhead).
