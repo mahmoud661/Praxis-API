@@ -14,14 +14,10 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # No async resources to open in this service (E2B SDK is sync,
-        # wrapped in run_in_executor).  The lifespan hook is kept so we
-        # have a natural place to add teardown logic later (e.g. killing
-        # all active sandboxes on graceful shutdown).
         yield
-        # Teardown: nothing to drain right now — E2B sandboxes continue
-        # running on E2B's side after the service exits.  Add explicit
-        # kill-all here if the deployment policy changes.
+        # Graceful shutdown: E2B client kills all active cloud sandboxes so
+        # billing stops; local Docker client closes the httpx connection pool.
+        await container.service.shutdown()
 
     app = FastAPI(
         title="sandbox-service",

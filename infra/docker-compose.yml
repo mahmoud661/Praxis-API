@@ -607,11 +607,14 @@ services:
       SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-}
       E2B_API_KEY: ${E2B_API_KEY:-}
       CORS_ORIGINS: '${SANDBOX_CORS_ORIGINS:-["*"]}'
-    # LOCAL provider only: the service talks to the host Docker daemon to
-    # spawn sibling sandbox containers, so it needs the socket mounted and
-    # must run as root to access it. DEV-ONLY — this is root-on-host access;
-    # do not enable the local provider on a shared/prod host.
-    user: root
+    # LOCAL provider only: the service talks to the host Docker daemon via the
+    # mounted socket. group_add grants the unprivileged app user (UID 1000)
+    # supplementary membership of the docker group so it can write to the
+    # socket without running as root. Set DOCKER_GID to match the GID of
+    # /var/run/docker.sock on your host if it differs from 999 (run
+    # `stat -c %g /var/run/docker.sock` to find it).
+    group_add:
+      - "${DOCKER_GID:-999}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

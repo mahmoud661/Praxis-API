@@ -528,5 +528,13 @@ class LocalDockerSandboxClient:
         return session
 
 
+    async def shutdown(self) -> None:
+        """Local sandbox containers are intentionally persistent — they survive
+        service restarts and reattach the same project volume on next create.
+        Killing them on shutdown would destroy in-progress work, so this is a
+        deliberate no-op. The httpx client is closed so the socket fd is freed."""
+        await self._http.aclose()
+
+
 # Structural Protocol check at import time (no runtime overhead).
 _: ISandboxClient = LocalDockerSandboxClient.__new__(LocalDockerSandboxClient)  # type: ignore[assignment]

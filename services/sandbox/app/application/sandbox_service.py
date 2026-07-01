@@ -91,3 +91,7 @@ class SandboxService:
         # Long-lived interactive shell. NOT lock-serialised — it must not
         # block exec/file ops for the session's whole lifetime.
         return await self._client.open_terminal(sandbox_id, cols=cols, rows=rows)
+
+    async def shutdown(self) -> None:
+        """Propagate graceful-shutdown to the underlying client."""
+        await self._client.shutdown()

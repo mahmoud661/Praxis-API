@@ -141,6 +141,23 @@ class E2BSandboxClient:
             "Interactive terminal is not supported for the E2B provider."
         )
 
+    async def shutdown(self) -> None:
+        """Kill every active E2B sandbox so billing stops when the service exits.
+
+        Best-effort: errors are logged but don't prevent other sandboxes from
+        being killed. The active-sandbox map is cleared regardless so a stale
+        handle can't be reused after the process restarts."""
+        import logging
+
+        log = logging.getLogger(__name__)
+        for sandbox_id, sbx in list(self._active_sandboxes.items()):
+            try:
+                await self._run(sbx.kill)
+                log.info("shutdown: killed E2B sandbox %s", sandbox_id)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("shutdown: could not kill E2B sandbox %s: %s", sandbox_id, exc)
+        self._active_sandboxes.clear()
+
 
 # Satisfy the structural Protocol check at import time (no runtime overhead).
 _: ISandboxClient = E2BSandboxClient.__new__(E2BSandboxClient)  # type: ignore[assignment]

@@ -107,3 +107,10 @@ class ISandboxClient(Protocol):
           - `vnc://host:port` (local Docker) — relayed WS↔raw TCP to the
             container's x11vnc server."""
         ...
+
+    async def shutdown(self) -> None:
+        """Tear down all resources held by this client on service exit.
+
+        E2B: kills all active cloud sandboxes (stops billing).
+        Local Docker: no-op (containers are intentionally persistent)."""
+        ...
