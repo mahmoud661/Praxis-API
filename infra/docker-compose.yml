@@ -53,6 +53,7 @@ volumes:
   loki_data:
   postgres_auth_data:
   postgres_agents_data:
+  postgres_projects_data:
   qdrant_data:
   ai_agents_files:
   caddy_data:
@@ -459,6 +460,8 @@ services:
       AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
       AI_AGENTS_SERVICE_URL: ${AI_AGENTS_SERVICE_URL}
       MEMORY_SERVICE_URL: ${MEMORY_SERVICE_URL:-http://memory-service:8001}
+      PROJECTS_SERVICE_URL: ${PROJECTS_SERVICE_URL:-http://projects-service:8003}
+      SANDBOX_SERVICE_URL: ${SANDBOX_SERVICE_URL:-http://sandbox-service:8004}
       # Resilience
       PROXY_CB_THRESHOLD: ${PROXY_CB_THRESHOLD:-5}
       PROXY_CB_RESET_MS: ${PROXY_CB_RESET_MS:-15000}
@@ -468,6 +471,8 @@ services:
       auth-service: { condition: service_started }
       ai-agents-service: { condition: service_started }
       memory-service: { condition: service_started }
+      projects-service: { condition: service_started }
+      sandbox-service: { condition: service_started }
     <<: *app-defaults
 
   # ============================================================
@@ -524,4 +529,100 @@ services:
       qdrant: { condition: service_healthy }
       kafka: { condition: service_healthy }
       kafka-init: { condition: service_completed_successfully }
+    <<: *app-defaults
+
+  # ============================================================
+  # Projects service: persists project metadata + credentials
+  # ============================================================
+  projects-service:
+    build:
+      context: ../services/projects
+      dockerfile: Dockerfile
+    container_name: projects-service
+    networks: [backend_platform]
+    ports:
+      - "${PROJECTS_PORT:-8003}:8003"
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: projects-service
+      DATABASE_URL: ${PROJECTS_DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres-projects:5432/praxis_projects}
+      ENCRYPTION_KEY: ${PROJECTS_ENCRYPTION_KEY:-JcqTQRXfEG47JRv6Vwjol5BPQXpa4z_-IZF6BPw-t9Q=}
+      CORS_ORIGINS: '${PROJECTS_CORS_ORIGINS:-["*"]}'
+    depends_on:
+      postgres-projects: { condition: service_healthy }
+    <<: *app-defaults
+
+  postgres-projects:
+    image: postgres:16-alpine
+    container_name: postgres-projects
+    networks: [backend_platform]
+    ports:
+      - "${PROJECTS_DB_PORT:-5435}:5432"
+    environment:
+      POSTGRES_USER: ${PROJECTS_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${PROJECTS_DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${PROJECTS_DB_NAME:-praxis_projects}
+    volumes:
+      - postgres_projects_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PROJECTS_DB_USER:-postgres} -d ${PROJECTS_DB_NAME:-praxis_projects}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    <<: *platform-defaults
+
+  # ============================================================
+  # Sandbox service: E2B-backed project execution environments
+  # ============================================================
+  # Builds the local sandbox desktop base image and exits (kafka-init
+  # pattern). sandbox-service launches sandbox containers FROM this image,
+  # so it must exist on the daemon before the first `create`.
+  sandbox-desktop-image:
+    build:
+      context: ../services/sandbox
+      dockerfile: desktop.Dockerfile
+    image: praxis-sandbox-desktop:local
+    command: ["true"]
+    restart: "no"
+    networks: [backend_platform]
+
+  sandbox-service:
+    build:
+      context: ../services/sandbox
+      dockerfile: Dockerfile
+    container_name: sandbox-service
+    networks: [backend_platform]
+    ports:
+      - "${SANDBOX_PORT:-8004}:8004"
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: sandbox-service
+      # Sandbox backend. "local" (default) runs each sandbox as a Docker
+      # container on the host daemon — no account/key needed. Set to "e2b"
+      # (plus E2B_API_KEY) to use E2B cloud desktop sandboxes instead.
+      SANDBOX_PROVIDER: ${SANDBOX_PROVIDER:-local}
+      LOCAL_SANDBOX_IMAGE: ${LOCAL_SANDBOX_IMAGE:-praxis-sandbox-desktop:local}
+      # "" = default runc. Set to "sysbox-runc" (once Sysbox is installed on
+      # the host) to give each sandbox unprivileged nested-Docker capability.
+      SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-}
+      E2B_API_KEY: ${E2B_API_KEY:-}
+      # Per-sandbox resource caps (local provider): memory in MB, CPUs as a
+      # float, and a pids ceiling (fork-bomb guard). 0 disables a cap.
+      SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-2048}
+      SANDBOX_CPUS: ${SANDBOX_CPUS:-2.0}
+      SANDBOX_PIDS_LIMIT: ${SANDBOX_PIDS_LIMIT:-512}
+      CORS_ORIGINS: '${SANDBOX_CORS_ORIGINS:-["*"]}'
+    # LOCAL provider only: the service talks to the host Docker daemon via the
+    # mounted socket. group_add grants the unprivileged app user (UID 1000)
+    # supplementary membership of the socket's group so it can write to the
+    # socket without running as root. On Docker Desktop for Windows the socket
+    # is always owned by root:root (GID 0); on native Linux it's typically the
+    # docker group (GID 999). Override DOCKER_GID if yours differs.
+    group_add:
+      - "${DOCKER_GID:-0}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      sandbox-desktop-image:
+        condition: service_completed_successfully
     <<: *app-defaults

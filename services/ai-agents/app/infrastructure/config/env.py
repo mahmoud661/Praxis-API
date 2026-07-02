@@ -123,6 +123,16 @@ class Env(BaseSettings):
     # memory_search / memory_store tool calls.
     memory_service_url: str = "http://memory-service:8001"
 
+    # Projects service base URL. When a thread is linked to a project
+    # (config.project_id), the runner fetches that project's context
+    # (repo URL, sandbox id) from here to prime the agent's first turn.
+    projects_service_url: str = "http://projects-service:8003"
+
+    # Sandbox service base URL. The project sandbox tools (run_command,
+    # read/write files, stream url) call this to act inside a project's
+    # sandbox environment.
+    sandbox_service_url: str = "http://sandbox-service:8004"
+
     @property
     def kafka_broker_list(self) -> list[str]:
         return [b.strip() for b in self.kafka_brokers.split(",") if b.strip()]

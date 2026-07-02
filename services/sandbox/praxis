@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""praxis — the in-sandbox project CLI.
+
+Commands:
+  praxis init [--yes]   Detect the project stack, ask 3 questions, write
+                        /workspace/.praxis (JSON). --yes accepts detections.
+  praxis setup          Run the setup commands from .praxis (used on boot).
+  praxis start          Run the start command from .praxis.
+  praxis show           Print the current .praxis config.
+
+The .praxis file lives at the workspace root, travels with the project,
+and is what the platform reads to auto-install dependencies and surface
+expected ports after a sandbox restart.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+
+WORKSPACE = os.environ.get("PRAXIS_WORKSPACE", "/workspace")
+CONFIG = os.path.join(WORKSPACE, ".praxis")
+
+DIM = "\033[2m"
+BOLD = "\033[1m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RESET = "\033[0m"
+
+
+def _exists(*names: str) -> bool:
+    return any(os.path.exists(os.path.join(WORKSPACE, n)) for n in names)
+
+
+def detect() -> dict:
+    """Best-guess config from well-known manifest files in the workspace."""
+    setup: list[str] = []
+    start = ""
+    ports: list[int] = []
+
+    pkg = os.path.join(WORKSPACE, "package.json")
+    if os.path.exists(pkg):
+        setup.append("npm install")
+        try:
+            scripts = json.load(open(pkg)).get("scripts", {})
+        except Exception:
+            scripts = {}
+        if "dev" in scripts:
+            start = "npm run dev"
+        elif "start" in scripts:
+            start = "npm start"
+        ports.append(3000)
+
+    if _exists("requirements.txt"):
+        setup.append("pip install -r requirements.txt")
+        ports.append(8000)
+    elif _exists("pyproject.toml"):
+        setup.append("pip install -e .")
+        ports.append(8000)
+
+    if _exists("go.mod"):
+        setup.append("go mod download")
+        start = start or "go run ."
+        ports.append(8080)
+
+    if _exists("Cargo.toml"):
+        setup.append("cargo build")
+        start = start or "cargo run"
+        ports.append(8080)
+
+    if _exists("composer.json"):
+        setup.append("composer install")
+        ports.append(8000)
+
+    return {"setup": setup, "start": start, "ports": sorted(set(ports))}
+
+
+def load() -> dict | None:
+    try:
+        with open(CONFIG) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError as exc:
+        print(f"{YELLOW}warning:{RESET} .praxis is not valid JSON: {exc}", file=sys.stderr)
+        return None
+
+
+def save(cfg: dict) -> None:
+    with open(CONFIG, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+
+
+def _ask(label: str, default: str) -> str:
+    hint = f" {DIM}[{default}]{RESET}" if default else ""
+    try:
+        answer = input(f"{CYAN}?{RESET} {label}{hint}: ").strip()
+    except EOFError:
+        answer = ""
+    return answer or default
+
+
+def cmd_init(assume_yes: bool) -> int:
+    detected = detect()
+    found = bool(detected["setup"] or detected["start"])
+    if found:
+        print(f"{GREEN}✓{RESET} Detected project files in {WORKSPACE}")
+    else:
+        print(f"{DIM}No known manifests found — starting blank.{RESET}")
+
+    if assume_yes:
+        cfg = detected
+    else:
+        setup_default = " && ".join(detected["setup"])
+        setup = _ask("Setup commands (run on every start, `&&`-separated)", setup_default)
+        start = _ask("Start command (for the Run button)", detected["start"])
+        ports_default = ",".join(str(p) for p in detected["ports"])
+        ports_raw = _ask("Port(s) your app listens on (comma-separated)", ports_default)
+        cfg = {
+            "setup": [c.strip() for c in setup.split("&&") if c.strip()],
+            "start": start,
+            "ports": [int(p) for p in ports_raw.replace(" ", "").split(",") if p],
+        }
+
+    save(cfg)
+    print(f"{GREEN}✓{RESET} Wrote {BOLD}{CONFIG}{RESET}")
+    print(json.dumps(cfg, indent=2))
+
+    if cfg["setup"]:
+        if assume_yes:
+            return cmd_setup()
+        run_now = _ask("Run setup commands now? (y/N)", "n").lower()
+        if run_now.startswith("y"):
+            return cmd_setup()
+    return 0
+
+
+def cmd_setup() -> int:
+    cfg = load()
+    if not cfg or not cfg.get("setup"):
+        print(f"{DIM}Nothing to do — no setup commands in .praxis.{RESET}")
+        return 0
+    for command in cfg["setup"]:
+        print(f"{CYAN}▸{RESET} {command}")
+        code = subprocess.call(command, shell=True, cwd=WORKSPACE)
+        if code != 0:
+            print(f"{YELLOW}✗ '{command}' exited {code} — stopping.{RESET}", file=sys.stderr)
+            return code
+    print(f"{GREEN}✓{RESET} Setup complete.")
+    return 0
+
+
+def cmd_start() -> int:
+    cfg = load()
+    if not cfg or not cfg.get("start"):
+        print(f"{DIM}No start command in .praxis — run `praxis init`.{RESET}")
+        return 1
+    print(f"{CYAN}▸{RESET} {cfg['start']}")
+    return subprocess.call(cfg["start"], shell=True, cwd=WORKSPACE)
+
+
+def cmd_show() -> int:
+    cfg = load()
+    if cfg is None:
+        print(f"{DIM}No .praxis file yet — run `praxis init`.{RESET}")
+        return 1
+    print(json.dumps(cfg, indent=2))
+    return 0
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    cmd, rest = args[0], args[1:]
+    if cmd == "init":
+        return cmd_init(assume_yes="--yes" in rest or "-y" in rest)
+    if cmd == "setup":
+        return cmd_setup()
+    if cmd == "start":
+        return cmd_start()
+    if cmd == "show":
+        return cmd_show()
+    print(f"unknown command: {cmd} (try `praxis help`)", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -129,6 +129,7 @@ def _config_to_dict(config: ThreadConfigView) -> dict[str, Any]:
         "agent_id": config.agent_id,
         "tool_overrides": dict(config.tool_overrides),
         "custom_system_prompt_id": config.custom_system_prompt_id,
+        "project_id": config.project_id,
     }
 
 
@@ -145,12 +146,14 @@ def _config_from_dict(raw: object) -> ThreadConfigView:
     }
     agent_id = raw.get("agent_id")
     prompt_id = raw.get("custom_system_prompt_id")
+    project_id = raw.get("project_id")
     return ThreadConfigView(
         agent_id=agent_id if isinstance(agent_id, str) else None,
         tool_overrides=cleaned,
         custom_system_prompt_id=(
             prompt_id if isinstance(prompt_id, str) else None
         ),
+        project_id=project_id if isinstance(project_id, str) else None,
     )
 
 

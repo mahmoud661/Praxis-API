@@ -21,7 +21,10 @@ class ThreadConfigView:
 
     `agent_id` (`None` → use the account default agent), `tool_overrides`
     (`{tool_id: enabled_bool}` — sparse, only entries for tools the user
-    actually flipped), `custom_system_prompt_id` (future use).
+    actually flipped), `custom_system_prompt_id` (future use),
+    `project_id` (`None` → a normal standalone chat; set → this thread is
+    the conversation for that project, and the runner primes the agent's
+    first turn with the project's repo/sandbox context).
 
     Stored as a JSON sub-object inside the LangGraph k/v store value
     alongside owner_id + title + timestamps. Threads created BEFORE
@@ -31,6 +34,7 @@ class ThreadConfigView:
     agent_id: str | None = None
     tool_overrides: dict[str, bool] = field(default_factory=dict)
     custom_system_prompt_id: str | None = None
+    project_id: str | None = None
 
 
 # A reusable "no overrides" sentinel for older threads.

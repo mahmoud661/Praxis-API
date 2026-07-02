@@ -28,8 +28,10 @@ from typing import Any, Awaitable, Callable
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ....application.services._errors import FileNotFoundError
+from ....domain.IRepos.i_thread_repo import IThreadRepo
 from ....domain.IServices.i_files_service import IFilesService
 from ....domain.ports.i_memory_client import IMemoryClient
+from ....domain.ports.i_projects_client import IProjectsClient, ProjectContext
 from ....domain.ports.logger import Logger
 from .agent_registry import AgentRegistry
 from .event_normalizer import normalize_event
@@ -43,6 +45,8 @@ class AgentRunner:
         agent_registry: AgentRegistry,
         files: IFilesService,
         memory_client: IMemoryClient,
+        projects_client: IProjectsClient,
+        thread_repo: IThreadRepo,
         logger: Logger,
     ) -> None:
         # The runner's only entry into the agentic stack is through an
@@ -57,6 +61,8 @@ class AgentRunner:
         self._registry = agent_registry
         self._files = files
         self._memory = memory_client
+        self._projects = projects_client
+        self._thread_repo = thread_repo
         self._logger = logger
 
     async def run(
@@ -81,6 +87,10 @@ class AgentRunner:
         """
         graph = self._registry.default_agent().get()
         attachment_ids = list(attachments or [])
+        # Project this thread is bound to (if any). Lands in the config so the
+        # sandbox tools can resolve the project's sandbox themselves instead of
+        # the model having to pass a sandbox id.
+        project_id = await self._project_id(thread_id)
         config = {
             "configurable": {
                 "thread_id": thread_id,
@@ -90,6 +100,8 @@ class AgentRunner:
                 # is the "user sent text only" signal, missing key would
                 # be a config-shape bug.
                 "attachments": attachment_ids,
+                # None for a normal standalone chat.
+                "project_id": project_id,
             }
         }
         # Link each attachment to this conversation in the knowledge graph.
@@ -141,6 +153,17 @@ class AgentRunner:
             except Exception:  # noqa: BLE001
                 pass  # never block the run on a failed or slow memory fetch
 
+            # If this thread is linked to a project, prime the agent with the
+            # project's repo + sandbox so it knows what it's working on and
+            # which sandbox id to pass to the sandbox tools. Best-effort and
+            # time-boxed — a slow/absent projects service must never delay or
+            # fail the run. Inserted at index 0 so it leads the context.
+            project_prompt = await self._project_context_prompt(
+                project_id=project_id, owner_id=owner_id
+            )
+            if project_prompt:
+                messages.insert(0, SystemMessage(content=project_prompt))
+
         inputs = {"messages": messages}
 
         self._logger.info("agent.run.start", thread_id=thread_id)
@@ -161,6 +184,51 @@ class AgentRunner:
         finally:
             await on_event({"type": "run.end", "thread_id": thread_id})
             self._logger.info("agent.run.end", thread_id=thread_id)
+
+    async def _project_id(self, thread_id: str) -> str | None:
+        """The project this thread is bound to (`config.project_id`), or None."""
+        try:
+            thread = await self._thread_repo.get(thread_id)
+        except Exception:  # noqa: BLE001
+            return None
+        return thread.config.project_id if thread else None
+
+    async def _project_context_prompt(
+        self, *, project_id: str | None, owner_id: str
+    ) -> str | None:
+        """Build the system-prompt preamble for a project-linked thread:
+        the project's name + repo, and a note that the sandbox tools operate
+        on this project's sandbox automatically (auto-created on first use).
+        Returns `None` for standalone chats or on any failure — the caller
+        treats project context as best-effort."""
+        if not project_id:
+            return None
+        try:
+            project: ProjectContext | None = await asyncio.wait_for(
+                self._projects.get_project(
+                    project_id=project_id, owner_id=owner_id
+                ),
+                timeout=3.0,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if project is None:
+            return None
+
+        lines = [
+            f'You are the coding agent for the project "{project.name}".',
+        ]
+        if project.github_repo_url:
+            lines.append(f"GitHub repository: {project.github_repo_url}")
+        lines.append(
+            "You have a persistent Linux sandbox for this project at "
+            "/workspace. The sandbox tools (run_command_in_sandbox, "
+            "read/write/list files, get_sandbox_stream_url) operate on it "
+            "directly — you do NOT need a sandbox id, and the sandbox is "
+            "started automatically the first time you use a tool. Files and "
+            "installed packages persist across turns."
+        )
+        return "\n".join(lines)
 
     async def _snapshot_attachments(
         self, *, owner_id: str, file_ids: list[str]

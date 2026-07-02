@@ -47,6 +47,10 @@ export interface GatewayHandles {
    *  attaches its `.upgrade` to the HTTP server's `upgrade` event after
    *  the session auth runs in that handler. */
   wsProxy: ReturnType<typeof makeWsProxy>;
+  /** WebSocket proxy for `/v1/ws/sandbox/:sandboxId/stream` → sandbox-service
+   *  `/sandbox/:sandboxId/stream`. Session auth injects X-User-Id and
+   *  X-Project-Id on the upgrade request before this proxy sees it. */
+  sandboxWsProxy: ReturnType<typeof makeWsProxy>;
 }
 
 export function buildApp(deps: {
@@ -117,6 +121,16 @@ export function buildApp(deps: {
   );
   const agentsBreaker = new CircuitBreaker(
     "ai-agents-service",
+    config.PROXY_CB_THRESHOLD,
+    config.PROXY_CB_RESET_MS,
+  );
+  const projectsBreaker = new CircuitBreaker(
+    "projects-service",
+    config.PROXY_CB_THRESHOLD,
+    config.PROXY_CB_RESET_MS,
+  );
+  const sandboxBreaker = new CircuitBreaker(
+    "sandbox-service",
     config.PROXY_CB_THRESHOLD,
     config.PROXY_CB_RESET_MS,
   );
@@ -240,6 +254,45 @@ export function buildApp(deps: {
     }),
   );
 
+  // /v1/projects/* — projects-service. Requires session; downstream receives
+  // X-User-Id (injected by prepareProxyRequest via req.user). Idempotency
+  // layer guards mutating operations (POST/PUT/PATCH) against retried requests
+  // creating duplicate project rows.
+  app.use(
+    "/v1/projects",
+    attachSession,
+    requireSession,
+    perIdentityLimit,
+    idempotency,
+    makeCircuitBreakerMiddleware(projectsBreaker),
+    makeServiceProxy({
+      target: config.PROJECTS_SERVICE_URL,
+      requireAuth: true,
+      pathRewrite: reprefix("/projects"),
+      logger,
+    }),
+  );
+
+  // /v1/sandbox/* — sandbox-service. Requires session; downstream receives both
+  // X-User-Id and X-Project-Id. The client must supply X-Project-Id on every
+  // request; the gateway strips any client-supplied X-User-Id (handled inside
+  // prepareProxyRequest) and passes X-Project-Id through untouched — it is not
+  // a gateway-owned identity claim so we don't strip it. No idempotency layer:
+  // sandbox operations (exec, reset, file I/O) are not safe to replay.
+  app.use(
+    "/v1/sandbox",
+    attachSession,
+    requireSession,
+    perIdentityLimit,
+    makeCircuitBreakerMiddleware(sandboxBreaker),
+    makeServiceProxy({
+      target: config.SANDBOX_SERVICE_URL,
+      requireAuth: true,
+      pathRewrite: reprefix("/sandbox"),
+      logger,
+    }),
+  );
+
   // -----------------------------------------------------------------
   // Legacy paths (no version prefix) — kept as alias for backward compat,
   // marked Deprecated. Remove once all clients move to /v1.
@@ -298,6 +351,21 @@ export function buildApp(deps: {
       .json({ error: "UPGRADE_REQUIRED", path: req.path });
   });
 
+  // WebSocket proxy: /v1/ws/sandbox/:sandboxId/stream → sandbox-service
+  // /sandbox/:sandboxId/stream. Session auth (X-User-Id + X-Project-Id) is
+  // injected by main.ts's upgrade handler before this proxy sees the request.
+  // HTTP fallback returns 426 so clients know they must send an Upgrade header.
+  const sandboxWsProxy = makeWsProxy({
+    target: config.SANDBOX_SERVICE_URL,
+    pathRewrite: { "^/v1/ws/sandbox": "/sandbox" },
+  });
+  app.use("/v1/ws/sandbox", (req, res) => {
+    res
+      .status(426)
+      .set("Upgrade", "websocket")
+      .json({ error: "UPGRADE_REQUIRED", path: req.path });
+  });
+
   app.use((_req, res) => res.status(404).json({ error: "NOT_FOUND" }));
 
   // Last in the chain: anything that called next(err) lands here.
@@ -305,8 +373,14 @@ export function buildApp(deps: {
 
   logger.info("gateway routes wired", {
     versions: ["v1"],
-    breakers: [authBreaker.name, agentsBreaker.name, memoryBreaker.name],
-    ws: ["/v1/ws/*"],
+    breakers: [
+      authBreaker.name,
+      agentsBreaker.name,
+      memoryBreaker.name,
+      projectsBreaker.name,
+      sandboxBreaker.name,
+    ],
+    ws: ["/v1/ws/*", "/v1/ws/sandbox/:sandboxId/stream"],
   });
-  return { app, wsProxy };
+  return { app, wsProxy, sandboxWsProxy };
 }
