@@ -46,10 +46,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       git \
+      nodejs \
+      npm \
     && rm -rf /var/lib/apt/lists/*
+
+# nodejs/npm: the base image is python-only; without node the most common
+# project type (package.json) can't `npm install` inside the sandbox.
 
 # xkb-data: XKEYBOARD keymaps, required for x11vnc's `-xkb` (full keyboard).
 # xdotool: lets the agent (and debugging) drive the X session synthetically.
+
+# --- praxis CLI: in-sandbox project config tool ------------------------------
+# `praxis init` detects the stack and writes /workspace/.praxis; the sandbox
+# service runs `praxis setup` automatically on boot so dependencies are
+# reinstalled without the user doing anything.
+COPY praxis /usr/local/bin/praxis
+RUN chmod +x /usr/local/bin/praxis
+
+# Terminal hint: every interactive bash (desktop terminal + the workspace
+# PTY dock both source /etc/bash.bashrc) nudges toward `praxis init` until
+# a .praxis exists.
+RUN printf '%s\n' \
+      '' \
+      'if [ -t 1 ] && [ ! -f /workspace/.praxis ]; then' \
+      '  printf "\\033[2m💡 No project config found. Run \\033[0m\\033[36mpraxis init\\033[0m\\033[2m to auto-install deps on every start.\\033[0m\\n"' \
+      'fi' \
+      >> /etc/bash.bashrc
 
 # --- Wallpaper: generated at build time (no licensing, no downloads) ---------
 # Firewatch-style dusk scene — gradient sky, stars, layered mountain ridges,

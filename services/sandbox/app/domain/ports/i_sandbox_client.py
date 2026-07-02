@@ -8,6 +8,12 @@ from typing import Protocol
 class SandboxInfo:
     sandbox_id: str
     stream_url: str
+    # True when this call actually (re)started the sandbox from nothing —
+    # a fresh container or a cold start of a stopped one. False for warm
+    # paths (get-or-create hit, unpause). The application layer uses this
+    # fact to decide whether boot-time work (dependency setup) must run;
+    # the adapter only reports what happened.
+    cold_start: bool = False
 
 
 @dataclass
@@ -77,6 +83,11 @@ class ISandboxClient(Protocol):
 
     async def run_command(self, sandbox_id: str, cmd: str) -> CommandResult:
         """Execute `cmd` inside the sandbox shell and return the result."""
+        ...
+
+    async def run_detached(self, sandbox_id: str, cmd: str) -> None:
+        """Start `cmd` inside the sandbox and return immediately (no output).
+        For boot-time work that must not block a request."""
         ...
 
     async def write_file(self, sandbox_id: str, path: str, content: str) -> None:

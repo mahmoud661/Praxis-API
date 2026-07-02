@@ -26,6 +26,15 @@ class CreateSandboxRequest(BaseModel):
         ),
         max_length=64,
     )
+    template: str | None = Field(
+        default=None,
+        description=(
+            "Starter template id (see GET /sandbox/templates). Applied only "
+            "when the workspace is empty — an existing project volume is "
+            "never overwritten."
+        ),
+        max_length=64,
+    )
 
 
 class ExecCommandRequest(BaseModel):
@@ -85,6 +94,20 @@ class PortsResponse(BaseModel):
     ones reachable by the preview proxy."""
 
     ports: list[int]
+
+
+class TemplateInfo(BaseModel):
+    """A starter template the UI can offer at sandbox creation."""
+
+    id: str
+    name: str
+    description: str
+    start_command: str | None = None
+    ports: list[int] = []
+
+
+class TemplatesResponse(BaseModel):
+    templates: list[TemplateInfo]
 
 
 class MessageResponse(BaseModel):

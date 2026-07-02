@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shlex
 
 import httpx
 import websockets
@@ -19,6 +18,7 @@ from fastapi import (
 )
 
 from ...application.sandbox_service import SandboxService
+from ...domain.templates import TEMPLATES
 from ..schemas import (
     CommandResultResponse,
     CreateSandboxRequest,
@@ -30,37 +30,17 @@ from ..schemas import (
     ReadFileResponse,
     SandboxResponse,
     StreamUrlResponse,
+    TemplateInfo,
+    TemplatesResponse,
     WriteFileRequest,
 )
 
 # Hop-by-hop headers not forwarded through the preview reverse-proxy.
+# (An HTTP-transport concern, so it belongs to this layer.)
 _HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
-
-
-def _parse_listening_ports(procnet: str) -> list[int]:
-    """Parse `/proc/net/tcp{,6}` and return TCP ports in LISTEN state bound to
-    all interfaces (0.0.0.0 / ::) — those the preview proxy can reach.
-    Loopback-only binds are skipped (unreachable from this service)."""
-    ports: set[int] = set()
-    for line in procnet.splitlines():
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        local, state = parts[1], parts[3]
-        if state != "0A" or ":" not in local:  # 0A = TCP_LISTEN
-            continue
-        ip_hex, _, port_hex = local.rpartition(":")
-        if set(ip_hex) != {"0"}:  # only all-interfaces binds are reachable
-            continue
-        try:
-            ports.add(int(port_hex, 16))
-        except ValueError:
-            continue
-    ports.discard(5900)  # x11vnc — internal, not a user app
-    return sorted(ports)
 
 logger = logging.getLogger(__name__)
 
@@ -120,72 +100,6 @@ async def _relay_vnc_tcp(websocket: WebSocket, target: str) -> None:
             pass
 
 
-# Directories excluded from the file tree — huge / noise. They still show up
-# as folder nodes; we just don't descend into them.
-_TREE_PRUNE = (
-    "node_modules", ".git", ".venv", "venv", "__pycache__",
-    "dist", "build", ".next", ".cache", ".mypy_cache", ".pytest_cache",
-)
-_TREE_MAXDEPTH = 8
-_TREE_MAX_ENTRIES = 4000
-
-
-def _tree_find_cmd(path: str) -> str:
-    """A single `find` that lists the workspace as `<type>\\t<relpath>` lines,
-    pruning heavy dirs and bounding depth + count. GNU find only (`-printf`)."""
-    q = shlex.quote(path)
-    names = " -o ".join(f"-name {shlex.quote(n)}" for n in _TREE_PRUNE)
-    return (
-        f"find {q} -mindepth 1 -maxdepth {_TREE_MAXDEPTH} "
-        f"\\( {names} \\) -prune -printf '%y\\t%P\\n' "
-        f"-o -printf '%y\\t%P\\n' 2>/dev/null | head -n {_TREE_MAX_ENTRIES}"
-    )
-
-
-def _build_tree(stdout: str) -> list[dict]:
-    """Turn the flat `<type>\\t<relpath>` listing into a nested tree
-    (folders-first, alphabetical). Shape matches the frontend Magic UI
-    `TreeViewElement` (id/name/type/children)."""
-    entries: list[tuple[str, str]] = []
-    for line in stdout.splitlines():
-        if "\t" not in line:
-            continue
-        typ, rel = line.split("\t", 1)
-        if rel:
-            entries.append((typ, rel))
-    # Shallower paths first so a parent always exists before its children.
-    entries.sort(key=lambda e: e[1].count("/"))
-
-    nodes: dict[str, dict] = {}
-    roots: list[dict] = []
-    for typ, rel in entries:
-        parts = rel.split("/")
-        is_dir = typ == "d"
-        node: dict = {
-            "id": rel,
-            "name": parts[-1],
-            "type": "folder" if is_dir else "file",
-            "children": [] if is_dir else None,
-        }
-        nodes[rel] = node
-        parent = "/".join(parts[:-1])
-        bucket = roots
-        if parent:
-            p = nodes.get(parent)
-            if p is not None and p.get("children") is not None:
-                bucket = p["children"]
-        bucket.append(node)
-
-    def _sort(level: list[dict]) -> None:
-        level.sort(key=lambda n: (n["type"] != "folder", n["name"].lower()))
-        for n in level:
-            if n.get("children"):
-                _sort(n["children"])
-
-    _sort(roots)
-    return roots
-
-
 def _make_router(service: SandboxService) -> APIRouter:
     """Build and return the router with `service` closed over.
 
@@ -195,6 +109,24 @@ def _make_router(service: SandboxService) -> APIRouter:
     for a service that has no per-request lifecycle.
     """
 
+    # ── Templates ─────────────────────────────────────────────────────────────
+
+    @router.get("/sandbox/templates", response_model=TemplatesResponse)
+    async def list_templates() -> TemplatesResponse:
+        """Starter templates available for new sandboxes."""
+        return TemplatesResponse(
+            templates=[
+                TemplateInfo(
+                    id=t.id,
+                    name=t.name,
+                    description=t.description,
+                    start_command=t.praxis.get("start") or None,
+                    ports=t.praxis.get("ports", []),
+                )
+                for t in TEMPLATES.values()
+            ]
+        )
+
     # ── Create ────────────────────────────────────────────────────────────────
 
     @router.post("/sandbox", response_model=SandboxResponse, status_code=status.HTTP_201_CREATED)
@@ -202,7 +134,9 @@ def _make_router(service: SandboxService) -> APIRouter:
         """Provision a new sandbox (mounts the project volume when project_id is set)."""
         try:
             info = await service.create_sandbox(
-                timeout_secs=body.timeout_secs, project_id=body.project_id
+                timeout_secs=body.timeout_secs,
+                project_id=body.project_id,
+                template=body.template,
             )
         except Exception as exc:
             logger.exception("sandbox.create.failed")
@@ -327,31 +261,28 @@ def _make_router(service: SandboxService) -> APIRouter:
         """Return the workspace as a nested folder/file tree (heavy dirs
         pruned, depth + count bounded). Backs the workspace Files tab."""
         try:
-            result = await service.exec_command(sandbox_id, _tree_find_cmd(path))
+            tree = await service.file_tree(sandbox_id, path)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
             logger.exception("sandbox.files_tree.failed", extra={"sandbox_id": sandbox_id})
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return FileTreeResponse(tree=_build_tree(result.stdout))
+        return FileTreeResponse(tree=tree)
 
     # ── Ports (run engine) ──────────────────────────────────────────────────────
 
     @router.get("/sandbox/{sandbox_id}/ports", response_model=PortsResponse)
     async def sandbox_ports(sandbox_id: str) -> PortsResponse:
         """List the ports the sandbox is currently listening on (reachable
-        binds), so the UI can offer Preview/open. Reads /proc/net so it needs
-        no extra tools in the image."""
+        binds), so the UI can offer Preview/open."""
         try:
-            result = await service.exec_command(
-                sandbox_id, "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null"
-            )
+            ports = await service.list_ports(sandbox_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
             logger.exception("sandbox.ports.failed", extra={"sandbox_id": sandbox_id})
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return PortsResponse(ports=_parse_listening_ports(result.stdout))
+        return PortsResponse(ports=ports)
 
     # ── Preview reverse-proxy ────────────────────────────────────────────────────
 

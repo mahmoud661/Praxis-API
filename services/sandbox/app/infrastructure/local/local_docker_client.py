@@ -356,10 +356,13 @@ class LocalDockerSandboxClient:
         if project_id:
             # Get-or-create: reuse the project's running sandbox if there is
             # one (both the UI's "Start Sandbox" and the agent's tools route
-            # through here, so they converge on the same container).
+            # through here, so they converge on the same container). Warm
+            # path — nothing was (re)started.
             existing = await self._find_project_container(project_id)
             if existing:
-                return SandboxInfo(sandbox_id=existing, stream_url="")
+                return SandboxInfo(
+                    sandbox_id=existing, stream_url="", cold_start=False
+                )
         await self._ensure_image()
         network = await self._own_network()
         host_config: dict = {}
@@ -417,7 +420,7 @@ class LocalDockerSandboxClient:
                 # Non-fatal: the sandbox still works for files/commands even
                 # if the nested daemon didn't come up.
                 pass
-        return SandboxInfo(sandbox_id=sandbox_id, stream_url="")
+        return SandboxInfo(sandbox_id=sandbox_id, stream_url="", cold_start=True)
 
     async def resume(self, sandbox_id: str) -> SandboxInfo:
         ins = await self._http.get(f"/containers/{sandbox_id}/json")
@@ -425,13 +428,18 @@ class LocalDockerSandboxClient:
             raise self._not_found(sandbox_id)
         ins.raise_for_status()
         state = ins.json().get("State", {})
+        cold = False
         if state.get("Paused"):
+            # Unpause: processes were frozen, not killed — warm.
             r = await self._http.post(f"/containers/{sandbox_id}/unpause")
             r.raise_for_status()
         elif not state.get("Running"):
+            # Cold start of a stopped container: processes are gone but the
+            # /workspace volume persists.
             r = await self._http.post(f"/containers/{sandbox_id}/start")
             r.raise_for_status()
-        return SandboxInfo(sandbox_id=sandbox_id, stream_url="")
+            cold = True
+        return SandboxInfo(sandbox_id=sandbox_id, stream_url="", cold_start=cold)
 
     async def pause(self, sandbox_id: str) -> None:
         r = await self._http.post(f"/containers/{sandbox_id}/pause")
@@ -452,6 +460,23 @@ class LocalDockerSandboxClient:
 
     async def run_command(self, sandbox_id: str, cmd: str) -> CommandResult:
         return await self._exec(sandbox_id, cmd)
+
+    async def run_detached(self, sandbox_id: str, cmd: str) -> None:
+        """Fire-and-forget exec — starts the command and returns immediately.
+        For boot-time work that must not block a create/resume response."""
+        create = await self._http.post(
+            f"/containers/{sandbox_id}/exec",
+            json={"AttachStdout": False, "AttachStderr": False,
+                  "Cmd": ["/bin/sh", "-c", cmd]},
+        )
+        if create.status_code == 404:
+            raise self._not_found(sandbox_id)
+        create.raise_for_status()
+        start = await self._http.post(
+            f"/exec/{create.json()['Id']}/start",
+            json={"Detach": True, "Tty": False},
+        )
+        start.raise_for_status()
 
     async def write_file(self, sandbox_id: str, path: str, content: str) -> None:
         directory = dirname(path) or "/"

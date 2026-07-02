@@ -30,6 +30,7 @@ class ProjectOut(BaseModel):
     # exposing the value or even its encrypted form.
     github_token_set: bool
     sandbox_id: str | None
+    template: str | None
     setup_commands: list[str]
     start_command: str | None
     registered_ports: list[int]
@@ -59,6 +60,7 @@ class ProjectOut(BaseModel):
             github_repo_url=p.github_repo_url,
             github_token_set=p.github_encrypted_token is not None,
             sandbox_id=p.sandbox_id,
+            template=p.template,
             setup_commands=p.setup_commands or [],
             start_command=p.start_command,
             registered_ports=p.registered_ports or [],
@@ -78,6 +80,7 @@ class ProjectCreate(BaseModel):
     github_repo_url: str | None = Field(default=None, max_length=2048)
     # Plain-text token supplied by the user; encrypted before storage.
     github_token: str | None = Field(default=None, max_length=1024)
+    template: str | None = Field(default=None, max_length=64)
     setup_commands: list[str] = Field(default_factory=list)
     start_command: str | None = Field(default=None, max_length=1024)
     registered_ports: list[int] = Field(default_factory=list)

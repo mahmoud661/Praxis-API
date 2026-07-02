@@ -107,6 +107,13 @@ class E2BSandboxClient:
             exit_code=result.exit_code,
         )
 
+    async def run_detached(self, sandbox_id: str, cmd: str) -> None:
+        sbx = self._get(sandbox_id)
+        # SDK 2.x: background=True returns a handle immediately instead of
+        # blocking until the command exits. The handle is dropped on purpose
+        # — detached means no caller is waiting on the outcome.
+        await self._run(sbx.commands.run, cmd, background=True)
+
     async def write_file(self, sandbox_id: str, path: str, content: str) -> None:
         sbx = self._get(sandbox_id)
         # 2.x: the filesystem API moved from `.filesystem` to `.files`.

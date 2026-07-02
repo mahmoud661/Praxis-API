@@ -55,6 +55,11 @@ class Project(Base):
     # NULL until the orchestrator assigns one.
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Starter template chosen at creation (e.g. "react", "fastapi"). The
+    # sandbox service materialises it into the workspace on first boot; kept
+    # here so the UI can show the stack and re-provisioning stays consistent.
+    template: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # .praxis config — shell commands that run automatically every time the
     # sandbox starts (e.g. ["npm install", "pip install -r requirements.txt"]).
     setup_commands: Mapped[list] = mapped_column(
